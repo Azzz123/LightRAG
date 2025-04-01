@@ -6,7 +6,7 @@ from lightrag import LightRAG, QueryParam
 from lightrag.llm import ollama_model_complete, ollama_embedding
 from lightrag.utils import EmbeddingFunc
 
-WORKING_DIR = "./outputs/sputniknews_r_u_news"
+WORKING_DIR = "../outputs/aljazeera_r_u_news"
 
 logging.basicConfig(format="%(levelname)s:%(message)s", level=logging.INFO)
 
@@ -27,19 +27,13 @@ rag = LightRAG(
             texts, embed_model="quentinz/bge-large-zh-v1.5", host="http://localhost:11434"
         ),
     ),
-    addon_params={"example_number": 1,
-                  "language": "Simplified Chinese",
-                  "entity_types": ["实验_主体", "实验_设备", "实验_日期", "实验_位置", "演习_主体", "演习_内容",
-                                   "演习_日期", "演习_区域", "部署_主体", "部署_军事力量", "部署_日期", "部署_位置",
-                                   "支持_主体", "支持_对象", "支持_材料", "支持_日期", "事故_主体", "事故_结果",
-                                   "事故_日期", "事故_位置", "展示_主体", "展示_设备", "展示_日期", "展示_位置",
-                                   "冲突_主体", "冲突_对象", "冲突_日期", "冲突_位置", "伤害_主体", "伤害_数量",
-                                   "伤害_日期", "伤害_位置", "外交_主体", "外交_对象", "外交_内容", "外交_日期",
-                                   "舆论_主体", "舆论_对象", "舆论_内容", "舆论_日期", "时间轴_时间"],
+    addon_params={"language": "Simplified Chinese",
+                  "entity_types": ["主体", "实验设备", "时间轴-时间日期", "位置", "演习内容", "部署的军事力量",
+                                   "支持物质", "事故结果", "展示设备", "伤害数量", "外交内容", "舆论内容"],
                   "insert_batch_size": 16}
 )
 
-with open("./inputs/sputniknews_r_u_news_processed_with_time.txt", "r", encoding="utf-8") as f:
+with open("../inputs/aljazeera_r_u_news_processed_with_time.txt", "r", encoding="utf-8") as f:
     rag.insert(f.read())
 
 # # Perform naive search
