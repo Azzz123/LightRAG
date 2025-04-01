@@ -1,0 +1,114 @@
+2025-01-04 00:07:38 | INFO | openai_api_server | args: Namespace(host='0.0.0.0', port=8200, controller_address='http://127.0.0.1:21003', allow_credentials=False, allowed_origins=['*'], allowed_methods=['*'], allowed_headers=['*'], api_keys=None, ssl=False)
+2025-01-04 00:07:38 | ERROR | stderr | [32mINFO[0m:     Started server process [[36m3315442[0m]
+2025-01-04 00:07:38 | ERROR | stderr | [32mINFO[0m:     Waiting for application startup.
+2025-01-04 00:07:38 | ERROR | stderr | [32mINFO[0m:     Application startup complete.
+2025-01-04 00:07:38 | ERROR | stderr | [32mINFO[0m:     Uvicorn running on [1mhttp://0.0.0.0:8200[0m (Press CTRL+C to quit)
+2025-01-04 00:08:33 | INFO | stdout | [32mINFO[0m:     127.0.0.1:35740 - "[1mGET /v1/engines HTTP/1.1[0m" [31m404 Not Found[0m
+2025-01-04 00:09:02 | INFO | stdout | [32mINFO[0m:     127.0.0.1:35742 - "[1mGET /v1 HTTP/1.1[0m" [31m404 Not Found[0m
+2025-01-04 00:09:18 | INFO | stdout | [32mINFO[0m:     127.0.0.1:35746 - "[1mGET /v1 HTTP/1.1[0m" [31m404 Not Found[0m
+2025-01-04 00:13:28 | INFO | stdout | [32mINFO[0m:     127.0.0.1:35748 - "[1mGET /v1/completions HTTP/1.1[0m" [31m405 Method Not Allowed[0m
+2025-01-04 00:14:28 | INFO | stdout | [32mINFO[0m:     127.0.0.1:35750 - "[1mPOST /v1/completions HTTP/1.1[0m" [91m500 Internal Server Error[0m
+2025-01-04 00:14:28 | ERROR | stderr | [31mERROR[0m:    Exception in ASGI application
+2025-01-04 00:14:28 | ERROR | stderr | Traceback (most recent call last):
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/uvicorn/protocols/http/h11_impl.py", line 403, in run_asgi
+2025-01-04 00:14:28 | ERROR | stderr |     result = await app(  # type: ignore[func-returns-value]
+2025-01-04 00:14:28 | ERROR | stderr |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/uvicorn/middleware/proxy_headers.py", line 60, in __call__
+2025-01-04 00:14:28 | ERROR | stderr |     return await self.app(scope, receive, send)
+2025-01-04 00:14:28 | ERROR | stderr |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/fastapi/applications.py", line 1054, in __call__
+2025-01-04 00:14:28 | ERROR | stderr |     await super().__call__(scope, receive, send)
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/applications.py", line 113, in __call__
+2025-01-04 00:14:28 | ERROR | stderr |     await self.middleware_stack(scope, receive, send)
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/middleware/errors.py", line 187, in __call__
+2025-01-04 00:14:28 | ERROR | stderr |     raise exc
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/middleware/errors.py", line 165, in __call__
+2025-01-04 00:14:28 | ERROR | stderr |     await self.app(scope, receive, _send)
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/middleware/cors.py", line 85, in __call__
+2025-01-04 00:14:28 | ERROR | stderr |     await self.app(scope, receive, send)
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/middleware/exceptions.py", line 62, in __call__
+2025-01-04 00:14:28 | ERROR | stderr |     await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+2025-01-04 00:14:28 | ERROR | stderr |     raise exc
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+2025-01-04 00:14:28 | ERROR | stderr |     await app(scope, receive, sender)
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/routing.py", line 715, in __call__
+2025-01-04 00:14:28 | ERROR | stderr |     await self.middleware_stack(scope, receive, send)
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/routing.py", line 735, in app
+2025-01-04 00:14:28 | ERROR | stderr |     await route.handle(scope, receive, send)
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/routing.py", line 288, in handle
+2025-01-04 00:14:28 | ERROR | stderr |     await self.app(scope, receive, send)
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/routing.py", line 76, in app
+2025-01-04 00:14:28 | ERROR | stderr |     await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+2025-01-04 00:14:28 | ERROR | stderr |     raise exc
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+2025-01-04 00:14:28 | ERROR | stderr |     await app(scope, receive, sender)
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/routing.py", line 73, in app
+2025-01-04 00:14:28 | ERROR | stderr |     response = await f(request)
+2025-01-04 00:14:28 | ERROR | stderr |                ^^^^^^^^^^^^^^^^
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/fastapi/routing.py", line 301, in app
+2025-01-04 00:14:28 | ERROR | stderr |     raw_response = await run_endpoint_function(
+2025-01-04 00:14:28 | ERROR | stderr |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/fastapi/routing.py", line 212, in run_endpoint_function
+2025-01-04 00:14:28 | ERROR | stderr |     return await dependant.call(**values)
+2025-01-04 00:14:28 | ERROR | stderr |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2025-01-04 00:14:28 | ERROR | stderr |   File "/opt/data/private/lxt/FastChat/fastchat/serve/openai_api_server.py", line 602, in create_completion
+2025-01-04 00:14:28 | ERROR | stderr |     if content["error_code"] != 0:
+2025-01-04 00:14:28 | ERROR | stderr |        ~~~~~~~^^^^^^^^^^^^^^
+2025-01-04 00:14:28 | ERROR | stderr | TypeError: string indices must be integers, not 'str'
+2025-01-04 00:14:59 | INFO | stdout | [32mINFO[0m:     127.0.0.1:35752 - "[1mGET /v1/engines HTTP/1.1[0m" [31m404 Not Found[0m
+2025-01-04 00:16:04 | INFO | stdout | [32mINFO[0m:     127.0.0.1:35754 - "[1mPOST /v1/completions HTTP/1.1[0m" [91m500 Internal Server Error[0m
+2025-01-04 00:16:04 | ERROR | stderr | [31mERROR[0m:    Exception in ASGI application
+2025-01-04 00:16:04 | ERROR | stderr | Traceback (most recent call last):
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/uvicorn/protocols/http/h11_impl.py", line 403, in run_asgi
+2025-01-04 00:16:04 | ERROR | stderr |     result = await app(  # type: ignore[func-returns-value]
+2025-01-04 00:16:04 | ERROR | stderr |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/uvicorn/middleware/proxy_headers.py", line 60, in __call__
+2025-01-04 00:16:04 | ERROR | stderr |     return await self.app(scope, receive, send)
+2025-01-04 00:16:04 | ERROR | stderr |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/fastapi/applications.py", line 1054, in __call__
+2025-01-04 00:16:04 | ERROR | stderr |     await super().__call__(scope, receive, send)
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/applications.py", line 113, in __call__
+2025-01-04 00:16:04 | ERROR | stderr |     await self.middleware_stack(scope, receive, send)
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/middleware/errors.py", line 187, in __call__
+2025-01-04 00:16:04 | ERROR | stderr |     raise exc
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/middleware/errors.py", line 165, in __call__
+2025-01-04 00:16:04 | ERROR | stderr |     await self.app(scope, receive, _send)
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/middleware/cors.py", line 85, in __call__
+2025-01-04 00:16:04 | ERROR | stderr |     await self.app(scope, receive, send)
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/middleware/exceptions.py", line 62, in __call__
+2025-01-04 00:16:04 | ERROR | stderr |     await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+2025-01-04 00:16:04 | ERROR | stderr |     raise exc
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+2025-01-04 00:16:04 | ERROR | stderr |     await app(scope, receive, sender)
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/routing.py", line 715, in __call__
+2025-01-04 00:16:04 | ERROR | stderr |     await self.middleware_stack(scope, receive, send)
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/routing.py", line 735, in app
+2025-01-04 00:16:04 | ERROR | stderr |     await route.handle(scope, receive, send)
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/routing.py", line 288, in handle
+2025-01-04 00:16:04 | ERROR | stderr |     await self.app(scope, receive, send)
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/routing.py", line 76, in app
+2025-01-04 00:16:04 | ERROR | stderr |     await wrap_app_handling_exceptions(app, request)(scope, receive, send)
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+2025-01-04 00:16:04 | ERROR | stderr |     raise exc
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+2025-01-04 00:16:04 | ERROR | stderr |     await app(scope, receive, sender)
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/starlette/routing.py", line 73, in app
+2025-01-04 00:16:04 | ERROR | stderr |     response = await f(request)
+2025-01-04 00:16:04 | ERROR | stderr |                ^^^^^^^^^^^^^^^^
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/fastapi/routing.py", line 301, in app
+2025-01-04 00:16:04 | ERROR | stderr |     raw_response = await run_endpoint_function(
+2025-01-04 00:16:04 | ERROR | stderr |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/miniconda3/envs/fastchat/lib/python3.12/site-packages/fastapi/routing.py", line 212, in run_endpoint_function
+2025-01-04 00:16:04 | ERROR | stderr |     return await dependant.call(**values)
+2025-01-04 00:16:04 | ERROR | stderr |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2025-01-04 00:16:04 | ERROR | stderr |   File "/opt/data/private/lxt/FastChat/fastchat/serve/openai_api_server.py", line 602, in create_completion
+2025-01-04 00:16:04 | ERROR | stderr |     if content["error_code"] != 0:
+2025-01-04 00:16:04 | ERROR | stderr |        ~~~~~~~^^^^^^^^^^^^^^
+2025-01-04 00:16:04 | ERROR | stderr | TypeError: string indices must be integers, not 'str'
+2025-01-04 00:25:35 | ERROR | stderr | [32mINFO[0m:     Shutting down
+2025-01-04 00:25:36 | ERROR | stderr | [32mINFO[0m:     Waiting for application shutdown.
+2025-01-04 00:25:36 | ERROR | stderr | [32mINFO[0m:     Application shutdown complete.
+2025-01-04 00:25:36 | ERROR | stderr | [32mINFO[0m:     Finished server process [[36m3315442[0m]
