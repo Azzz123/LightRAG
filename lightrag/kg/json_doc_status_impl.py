@@ -30,7 +30,18 @@ class JsonDocStatusStorage(DocStatusStorage):
 
     def __post_init__(self):
         working_dir = self.global_config["working_dir"]
-        self._file_name = os.path.join(working_dir, f"kv_store_{self.namespace}.json")
+        if self.workspace:
+            # Include workspace in the file path for data isolation
+            workspace_dir = os.path.join(working_dir, self.workspace)
+            os.makedirs(workspace_dir, exist_ok=True)
+            self._file_name = os.path.join(
+                workspace_dir, f"kv_store_{self.namespace}.json"
+            )
+        else:
+            # Default behavior when workspace is empty
+            self._file_name = os.path.join(
+                working_dir, f"kv_store_{self.namespace}.json"
+            )
         self._data = None
         self._storage_lock = None
         self.storage_updated = None
@@ -102,17 +113,26 @@ class JsonDocStatusStorage(DocStatusStorage):
                 data_dict = (
                     dict(self._data) if hasattr(self._data, "_getvalue") else self._data
                 )
-                logger.info(
+                logger.debug(
                     f"Process {os.getpid()} doc status writting {len(data_dict)} records to {self.namespace}"
                 )
                 write_json(data_dict, self._file_name)
                 await clear_all_update_flags(self.namespace)
 
     async def upsert(self, data: dict[str, dict[str, Any]]) -> None:
+        """
+        Importance notes for in-memory storage:
+        1. Changes will be persisted to disk during the next index_done_callback
+        2. update flags to notify other processes that data persistence is needed
+        """
         if not data:
             return
-        logger.info(f"Inserting {len(data)} records to {self.namespace}")
+        logger.debug(f"Inserting {len(data)} records to {self.namespace}")
         async with self._storage_lock:
+            # Ensure chunks_list field exists for new documents
+            for doc_id, doc_data in data.items():
+                if "chunks_list" not in doc_data:
+                    doc_data["chunks_list"] = []
             self._data.update(data)
             await set_all_update_flags(self.namespace)
 
@@ -122,16 +142,50 @@ class JsonDocStatusStorage(DocStatusStorage):
         async with self._storage_lock:
             return self._data.get(id)
 
-    async def delete(self, doc_ids: list[str]):
-        async with self._storage_lock:
-            for doc_id in doc_ids:
-                self._data.pop(doc_id, None)
-            await set_all_update_flags(self.namespace)
-        await self.index_done_callback()
+    async def delete(self, doc_ids: list[str]) -> None:
+        """Delete specific records from storage by their IDs
 
-    async def drop(self) -> None:
-        """Drop the storage"""
+        Importance notes for in-memory storage:
+        1. Changes will be persisted to disk during the next index_done_callback
+        2. update flags to notify other processes that data persistence is needed
+
+        Args:
+            ids (list[str]): List of document IDs to be deleted from storage
+
+        Returns:
+            None
+        """
         async with self._storage_lock:
-            self._data.clear()
-            await set_all_update_flags(self.namespace)
-        await self.index_done_callback()
+            any_deleted = False
+            for doc_id in doc_ids:
+                result = self._data.pop(doc_id, None)
+                if result is not None:
+                    any_deleted = True
+
+            if any_deleted:
+                await set_all_update_flags(self.namespace)
+
+    async def drop(self) -> dict[str, str]:
+        """Drop all document status data from storage and clean up resources
+
+        This method will:
+        1. Clear all document status data from memory
+        2. Update flags to notify other processes
+        3. Trigger index_done_callback to save the empty state
+
+        Returns:
+            dict[str, str]: Operation status and message
+            - On success: {"status": "success", "message": "data dropped"}
+            - On failure: {"status": "error", "message": "<error details>"}
+        """
+        try:
+            async with self._storage_lock:
+                self._data.clear()
+                await set_all_update_flags(self.namespace)
+
+            await self.index_done_callback()
+            logger.info(f"Process {os.getpid()} drop {self.namespace}")
+            return {"status": "success", "message": "data dropped"}
+        except Exception as e:
+            logger.error(f"Error dropping {self.namespace}: {e}")
+            return {"status": "error", "message": str(e)}

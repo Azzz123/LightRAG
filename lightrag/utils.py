@@ -1,8 +1,8 @@
 from __future__ import annotations
+import weakref
 
 import asyncio
 import html
-import io
 import csv
 import json
 import logging
@@ -12,12 +12,50 @@ import re
 from dataclasses import dataclass
 from functools import wraps
 from hashlib import md5
-from typing import Any, Callable
-import xml.etree.ElementTree as ET
+from typing import Any, Protocol, Callable, TYPE_CHECKING, List
 import numpy as np
-import tiktoken
-from lightrag.prompt import PROMPTS
 from dotenv import load_dotenv
+from lightrag.constants import (
+    DEFAULT_LOG_MAX_BYTES,
+    DEFAULT_LOG_BACKUP_COUNT,
+    DEFAULT_LOG_FILENAME,
+)
+
+
+def get_env_value(
+    env_key: str, default: any, value_type: type = str, special_none: bool = False
+) -> any:
+    """
+    Get value from environment variable with type conversion
+
+    Args:
+        env_key (str): Environment variable key
+        default (any): Default value if env variable is not set
+        value_type (type): Type to convert the value to
+        special_none (bool): If True, return None when value is "None"
+
+    Returns:
+        any: Converted value from environment or default
+    """
+    value = os.getenv(env_key)
+    if value is None:
+        return default
+
+    # Handle special case for "None" string
+    if special_none and value == "None":
+        return None
+
+    if value_type is bool:
+        return value.lower() in ("true", "1", "yes", "t", "on")
+    try:
+        return value_type(value)
+    except (ValueError, TypeError):
+        return default
+
+
+# Use TYPE_CHECKING to avoid circular imports
+if TYPE_CHECKING:
+    from lightrag.base import BaseKVStorage
 
 # use the .env that is inside the current folder
 # allows to use different .env file for each lightrag instance
@@ -149,14 +187,16 @@ def setup_logger(
         # Get log file path
         if log_file_path is None:
             log_dir = os.getenv("LOG_DIR", os.getcwd())
-            log_file_path = os.path.abspath(os.path.join(log_dir, "lightrag.log"))
+            log_file_path = os.path.abspath(os.path.join(log_dir, DEFAULT_LOG_FILENAME))
 
         # Ensure log directory exists
         os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
 
         # Get log file max size and backup count from environment variables
-        log_max_bytes = int(os.getenv("LOG_MAX_BYTES", 10485760))  # Default 10MB
-        log_backup_count = int(os.getenv("LOG_BACKUP_COUNT", 5))  # Default 5 backups
+        log_max_bytes = get_env_value("LOG_MAX_BYTES", DEFAULT_LOG_MAX_BYTES, int)
+        log_backup_count = get_env_value(
+            "LOG_BACKUP_COUNT", DEFAULT_LOG_BACKUP_COUNT, int
+        )
 
         try:
             # Add file handler
@@ -187,9 +227,6 @@ class UnlimitedSemaphore:
 
     async def __aexit__(self, exc_type, exc, tb):
         pass
-
-
-ENCODER = None
 
 
 @dataclass
@@ -240,11 +277,10 @@ def convert_response_to_json(response: str) -> dict[str, Any]:
         raise e from None
 
 
-def compute_args_hash(*args: Any, cache_type: str | None = None) -> str:
+def compute_args_hash(*args: Any) -> str:
     """Compute a hash for the given arguments.
     Args:
         *args: Arguments to hash
-        cache_type: Type of cache (e.g., 'keywords', 'query', 'extract')
     Returns:
         str: Hash string
     """
@@ -252,11 +288,38 @@ def compute_args_hash(*args: Any, cache_type: str | None = None) -> str:
 
     # Convert all arguments to strings and join them
     args_str = "".join([str(arg) for arg in args])
-    if cache_type:
-        args_str = f"{cache_type}:{args_str}"
 
     # Compute MD5 hash
     return hashlib.md5(args_str.encode()).hexdigest()
+
+
+def generate_cache_key(mode: str, cache_type: str, hash_value: str) -> str:
+    """Generate a flattened cache key in the format {mode}:{cache_type}:{hash}
+
+    Args:
+        mode: Cache mode (e.g., 'default', 'local', 'global')
+        cache_type: Type of cache (e.g., 'extract', 'query', 'keywords')
+        hash_value: Hash value from compute_args_hash
+
+    Returns:
+        str: Flattened cache key
+    """
+    return f"{mode}:{cache_type}:{hash_value}"
+
+
+def parse_cache_key(cache_key: str) -> tuple[str, str, str] | None:
+    """Parse a flattened cache key back into its components
+
+    Args:
+        cache_key: Flattened cache key in format {mode}:{cache_type}:{hash}
+
+    Returns:
+        tuple[str, str, str] | None: (mode, cache_type, hash) or None if invalid format
+    """
+    parts = cache_key.split(":", 2)
+    if len(parts) == 3:
+        return parts[0], parts[1], parts[2]
+    return None
 
 
 def compute_mdhash_id(content: str, prefix: str = "") -> str:
@@ -268,17 +331,289 @@ def compute_mdhash_id(content: str, prefix: str = "") -> str:
     return prefix + md5(content.encode()).hexdigest()
 
 
-def limit_async_func_call(max_size: int):
-    """Add restriction of maximum concurrent async calls using asyncio.Semaphore"""
+# Custom exception class
+class QueueFullError(Exception):
+    """Raised when the queue is full and the wait times out"""
+
+    pass
+
+
+def priority_limit_async_func_call(max_size: int, max_queue_size: int = 1000):
+    """
+    Enhanced priority-limited asynchronous function call decorator
+
+    Args:
+        max_size: Maximum number of concurrent calls
+        max_queue_size: Maximum queue capacity to prevent memory overflow
+    Returns:
+        Decorator function
+    """
 
     def final_decro(func):
-        sem = asyncio.Semaphore(max_size)
+        # Ensure func is callable
+        if not callable(func):
+            raise TypeError(f"Expected a callable object, got {type(func)}")
+        queue = asyncio.PriorityQueue(maxsize=max_queue_size)
+        tasks = set()
+        initialization_lock = asyncio.Lock()
+        counter = 0
+        shutdown_event = asyncio.Event()
+        initialized = False  # Global initialization flag
+        worker_health_check_task = None
+
+        # Track active future objects for cleanup
+        active_futures = weakref.WeakSet()
+        reinit_count = 0  # Reinitialization counter to track system health
+
+        # Worker function to process tasks in the queue
+        async def worker():
+            """Worker that processes tasks in the priority queue"""
+            try:
+                while not shutdown_event.is_set():
+                    try:
+                        # Use timeout to get tasks, allowing periodic checking of shutdown signal
+                        try:
+                            (
+                                priority,
+                                count,
+                                future,
+                                args,
+                                kwargs,
+                            ) = await asyncio.wait_for(queue.get(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            # Timeout is just to check shutdown signal, continue to next iteration
+                            continue
+
+                        # If future is cancelled, skip execution
+                        if future.cancelled():
+                            queue.task_done()
+                            continue
+
+                        try:
+                            # Execute function
+                            result = await func(*args, **kwargs)
+                            # If future is not done, set the result
+                            if not future.done():
+                                future.set_result(result)
+                        except asyncio.CancelledError:
+                            if not future.done():
+                                future.cancel()
+                            logger.debug("limit_async: Task cancelled during execution")
+                        except Exception as e:
+                            logger.error(
+                                f"limit_async: Error in decorated function: {str(e)}"
+                            )
+                            if not future.done():
+                                future.set_exception(e)
+                        finally:
+                            queue.task_done()
+                    except Exception as e:
+                        # Catch all exceptions in worker loop to prevent worker termination
+                        logger.error(f"limit_async: Critical error in worker: {str(e)}")
+                        await asyncio.sleep(0.1)  # Prevent high CPU usage
+            finally:
+                logger.debug("limit_async: Worker exiting")
+
+        async def health_check():
+            """Periodically check worker health status and recover"""
+            nonlocal initialized
+            try:
+                while not shutdown_event.is_set():
+                    await asyncio.sleep(5)  # Check every 5 seconds
+
+                    # No longer acquire lock, directly operate on task set
+                    # Use a copy of the task set to avoid concurrent modification
+                    current_tasks = set(tasks)
+                    done_tasks = {t for t in current_tasks if t.done()}
+                    tasks.difference_update(done_tasks)
+
+                    # Calculate active tasks count
+                    active_tasks_count = len(tasks)
+                    workers_needed = max_size - active_tasks_count
+
+                    if workers_needed > 0:
+                        logger.info(
+                            f"limit_async: Creating {workers_needed} new workers"
+                        )
+                        new_tasks = set()
+                        for _ in range(workers_needed):
+                            task = asyncio.create_task(worker())
+                            new_tasks.add(task)
+                            task.add_done_callback(tasks.discard)
+                        # Update task set in one operation
+                        tasks.update(new_tasks)
+            except Exception as e:
+                logger.error(f"limit_async: Error in health check: {str(e)}")
+            finally:
+                logger.debug("limit_async: Health check task exiting")
+                initialized = False
+
+        async def ensure_workers():
+            """Ensure worker threads and health check system are available
+
+            This function checks if the worker system is already initialized.
+            If not, it performs a one-time initialization of all worker threads
+            and starts the health check system.
+            """
+            nonlocal initialized, worker_health_check_task, tasks, reinit_count
+
+            if initialized:
+                return
+
+            async with initialization_lock:
+                if initialized:
+                    return
+
+                # Increment reinitialization counter if this is not the first initialization
+                if reinit_count > 0:
+                    reinit_count += 1
+                    logger.warning(
+                        f"limit_async: Reinitializing needed (count: {reinit_count})"
+                    )
+                else:
+                    reinit_count = 1  # First initialization
+
+                # Check for completed tasks and remove them from the task set
+                current_tasks = set(tasks)
+                done_tasks = {t for t in current_tasks if t.done()}
+                tasks.difference_update(done_tasks)
+
+                # Log active tasks count during reinitialization
+                active_tasks_count = len(tasks)
+                if active_tasks_count > 0 and reinit_count > 1:
+                    logger.warning(
+                        f"limit_async: {active_tasks_count} tasks still running during reinitialization"
+                    )
+
+                # Create initial worker tasks, only adding the number needed
+                workers_needed = max_size - active_tasks_count
+                for _ in range(workers_needed):
+                    task = asyncio.create_task(worker())
+                    tasks.add(task)
+                    task.add_done_callback(tasks.discard)
+
+                # Start health check
+                worker_health_check_task = asyncio.create_task(health_check())
+
+                initialized = True
+                logger.info(f"limit_async: {workers_needed} new workers initialized")
+
+        async def shutdown():
+            """Gracefully shut down all workers and the queue"""
+            logger.info("limit_async: Shutting down priority queue workers")
+
+            # Set the shutdown event
+            shutdown_event.set()
+
+            # Cancel all active futures
+            for future in list(active_futures):
+                if not future.done():
+                    future.cancel()
+
+            # Wait for the queue to empty
+            try:
+                await asyncio.wait_for(queue.join(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "limit_async: Timeout waiting for queue to empty during shutdown"
+                )
+
+            # Cancel all worker tasks
+            for task in list(tasks):
+                if not task.done():
+                    task.cancel()
+
+            # Wait for all tasks to complete
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Cancel the health check task
+            if worker_health_check_task and not worker_health_check_task.done():
+                worker_health_check_task.cancel()
+                try:
+                    await worker_health_check_task
+                except asyncio.CancelledError:
+                    pass
+
+            logger.info("limit_async: Priority queue workers shutdown complete")
 
         @wraps(func)
-        async def wait_func(*args, **kwargs):
-            async with sem:
-                result = await func(*args, **kwargs)
-                return result
+        async def wait_func(
+            *args, _priority=10, _timeout=None, _queue_timeout=None, **kwargs
+        ):
+            """
+            Execute the function with priority-based concurrency control
+            Args:
+                *args: Positional arguments passed to the function
+                _priority: Call priority (lower values have higher priority)
+                _timeout: Maximum time to wait for function completion (in seconds)
+                _queue_timeout: Maximum time to wait for entering the queue (in seconds)
+                **kwargs: Keyword arguments passed to the function
+            Returns:
+                The result of the function call
+            Raises:
+                TimeoutError: If the function call times out
+                QueueFullError: If the queue is full and waiting times out
+                Any exception raised by the decorated function
+            """
+            # Ensure worker system is initialized
+            await ensure_workers()
+
+            # Create a future for the result
+            future = asyncio.Future()
+            active_futures.add(future)
+
+            nonlocal counter
+            async with initialization_lock:
+                current_count = counter  # Use local variable to avoid race conditions
+                counter += 1
+
+            # Try to put the task into the queue, supporting timeout
+            try:
+                if _queue_timeout is not None:
+                    # Use timeout to wait for queue space
+                    try:
+                        await asyncio.wait_for(
+                            # current_count is used to ensure FIFO order
+                            queue.put((_priority, current_count, future, args, kwargs)),
+                            timeout=_queue_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        raise QueueFullError(
+                            f"Queue full, timeout after {_queue_timeout} seconds"
+                        )
+                else:
+                    # No timeout, may wait indefinitely
+                    # current_count is used to ensure FIFO order
+                    await queue.put((_priority, current_count, future, args, kwargs))
+            except Exception as e:
+                # Clean up the future
+                if not future.done():
+                    future.set_exception(e)
+                active_futures.discard(future)
+                raise
+
+            try:
+                # Wait for the result, optional timeout
+                if _timeout is not None:
+                    try:
+                        return await asyncio.wait_for(future, _timeout)
+                    except asyncio.TimeoutError:
+                        # Cancel the future
+                        if not future.done():
+                            future.cancel()
+                        raise TimeoutError(
+                            f"limit_async: Task timed out after {_timeout} seconds"
+                        )
+                else:
+                    # Wait for the result without timeout
+                    return await future
+            finally:
+                # Clean up the future reference
+                active_futures.discard(future)
+
+        # Add the shutdown method to the decorated function
+        wait_func.shutdown = shutdown
 
         return wait_func
 
@@ -307,20 +642,89 @@ def write_json(json_obj, file_name):
         json.dump(json_obj, f, indent=2, ensure_ascii=False)
 
 
-def encode_string_by_tiktoken(content: str, model_name: str = "gpt-4o"):
-    global ENCODER
-    if ENCODER is None:
-        ENCODER = tiktoken.encoding_for_model(model_name)
-    tokens = ENCODER.encode(content)
-    return tokens
+class TokenizerInterface(Protocol):
+    """
+    Defines the interface for a tokenizer, requiring encode and decode methods.
+    """
+
+    def encode(self, content: str) -> List[int]:
+        """Encodes a string into a list of tokens."""
+        ...
+
+    def decode(self, tokens: List[int]) -> str:
+        """Decodes a list of tokens into a string."""
+        ...
 
 
-def decode_tokens_by_tiktoken(tokens: list[int], model_name: str = "gpt-4o"):
-    global ENCODER
-    if ENCODER is None:
-        ENCODER = tiktoken.encoding_for_model(model_name)
-    content = ENCODER.decode(tokens)
-    return content
+class Tokenizer:
+    """
+    A wrapper around a tokenizer to provide a consistent interface for encoding and decoding.
+    """
+
+    def __init__(self, model_name: str, tokenizer: TokenizerInterface):
+        """
+        Initializes the Tokenizer with a tokenizer model name and a tokenizer instance.
+
+        Args:
+            model_name: The associated model name for the tokenizer.
+            tokenizer: An instance of a class implementing the TokenizerInterface.
+        """
+        self.model_name: str = model_name
+        self.tokenizer: TokenizerInterface = tokenizer
+
+    def encode(self, content: str) -> List[int]:
+        """
+        Encodes a string into a list of tokens using the underlying tokenizer.
+
+        Args:
+            content: The string to encode.
+
+        Returns:
+            A list of integer tokens.
+        """
+        return self.tokenizer.encode(content)
+
+    def decode(self, tokens: List[int]) -> str:
+        """
+        Decodes a list of tokens into a string using the underlying tokenizer.
+
+        Args:
+            tokens: A list of integer tokens to decode.
+
+        Returns:
+            The decoded string.
+        """
+        return self.tokenizer.decode(tokens)
+
+
+class TiktokenTokenizer(Tokenizer):
+    """
+    A Tokenizer implementation using the tiktoken library.
+    """
+
+    def __init__(self, model_name: str = "gpt-4o-mini"):
+        """
+        Initializes the TiktokenTokenizer with a specified model name.
+
+        Args:
+            model_name: The model name for the tiktoken tokenizer to use.  Defaults to "gpt-4o-mini".
+
+        Raises:
+            ImportError: If tiktoken is not installed.
+            ValueError: If the model_name is invalid.
+        """
+        try:
+            import tiktoken
+        except ImportError:
+            raise ImportError(
+                "tiktoken is not installed. Please install it with `pip install tiktoken` or define custom `tokenizer_func`."
+            )
+
+        try:
+            tokenizer = tiktoken.encoding_for_model(model_name)
+            super().__init__(model_name=model_name, tokenizer=tokenizer)
+        except KeyError:
+            raise ValueError(f"Invalid model_name: {model_name}.")
 
 
 def pack_user_ass_to_openai_messages(*args: str):
@@ -334,6 +738,7 @@ def split_string_by_multi_markers(content: str, markers: list[str]) -> list[str]
     """Split a string by multiple markers"""
     if not markers:
         return [content]
+    content = content if content is not None else ""
     results = re.split("|".join(re.escape(marker) for marker in markers), content)
     return [r.strip() for r in results if r.strip()]
 
@@ -356,257 +761,53 @@ def is_float_regex(value: str) -> bool:
 
 
 def truncate_list_by_token_size(
-    list_data: list[Any], key: Callable[[Any], str], max_token_size: int
+    list_data: list[Any],
+    key: Callable[[Any], str],
+    max_token_size: int,
+    tokenizer: Tokenizer,
 ) -> list[int]:
     """Truncate a list of data by token size"""
     if max_token_size <= 0:
         return []
     tokens = 0
     for i, data in enumerate(list_data):
-        tokens += len(encode_string_by_tiktoken(key(data)))
+        tokens += len(tokenizer.encode(key(data)))
         if tokens > max_token_size:
             return list_data[:i]
     return list_data
 
 
-def list_of_list_to_csv(data: list[list[str]]) -> str:
-    output = io.StringIO()
-    writer = csv.writer(
-        output,
-        quoting=csv.QUOTE_ALL,  # Quote all fields
-        escapechar="\\",  # Use backslash as escape character
-        quotechar='"',  # Use double quotes
-        lineterminator="\n",  # Explicit line terminator
-    )
-    writer.writerows(data)
-    return output.getvalue()
+def process_combine_contexts(*context_lists):
+    """
+    Combine multiple context lists and remove duplicate content
 
+    Args:
+        *context_lists: Any number of context lists
 
-def csv_string_to_list(csv_string: str) -> list[list[str]]:
-    # Clean the string by removing NUL characters
-    cleaned_string = csv_string.replace("\0", "")
+    Returns:
+        Combined context list with duplicates removed
+    """
+    seen_content = {}
+    combined_data = []
 
-    output = io.StringIO(cleaned_string)
-    reader = csv.reader(
-        output,
-        quoting=csv.QUOTE_ALL,  # Match the writer configuration
-        escapechar="\\",  # Use backslash as escape character
-        quotechar='"',  # Use double quotes
-    )
-
-    try:
-        return [row for row in reader]
-    except csv.Error as e:
-        raise ValueError(f"Failed to parse CSV string: {str(e)}")
-    finally:
-        output.close()
-
-
-def save_data_to_file(data, file_name):
-    with open(file_name, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-
-
-def xml_to_json(xml_file):
-    try:
-        tree = ET.parse(xml_file)
-        root = tree.getroot()
-
-        # Print the root element's tag and attributes to confirm the file has been correctly loaded
-        print(f"Root element: {root.tag}")
-        print(f"Root attributes: {root.attrib}")
-
-        data = {"nodes": [], "edges": []}
-
-        # Use namespace
-        namespace = {"": "http://graphml.graphdrawing.org/xmlns"}
-
-        for node in root.findall(".//node", namespace):
-            node_data = {
-                "id": node.get("id").strip('"'),
-                "entity_type": node.find("./data[@key='d0']", namespace).text.strip('"')
-                if node.find("./data[@key='d0']", namespace) is not None
-                else "",
-                "description": node.find("./data[@key='d1']", namespace).text
-                if node.find("./data[@key='d1']", namespace) is not None
-                else "",
-                "source_id": node.find("./data[@key='d2']", namespace).text
-                if node.find("./data[@key='d2']", namespace) is not None
-                else "",
-            }
-            data["nodes"].append(node_data)
-
-        for edge in root.findall(".//edge", namespace):
-            edge_data = {
-                "source": edge.get("source").strip('"'),
-                "target": edge.get("target").strip('"'),
-                "weight": float(edge.find("./data[@key='d3']", namespace).text)
-                if edge.find("./data[@key='d3']", namespace) is not None
-                else 0.0,
-                "description": edge.find("./data[@key='d4']", namespace).text
-                if edge.find("./data[@key='d4']", namespace) is not None
-                else "",
-                "keywords": edge.find("./data[@key='d5']", namespace).text
-                if edge.find("./data[@key='d5']", namespace) is not None
-                else "",
-                "source_id": edge.find("./data[@key='d6']", namespace).text
-                if edge.find("./data[@key='d6']", namespace) is not None
-                else "",
-            }
-            data["edges"].append(edge_data)
-
-        # Print the number of nodes and edges found
-        print(f"Found {len(data['nodes'])} nodes and {len(data['edges'])} edges")
-
-        return data
-    except ET.ParseError as e:
-        print(f"Error parsing XML file: {e}")
-        return None
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        return None
-
-
-def process_combine_contexts(hl: str, ll: str):
-    header = None
-    list_hl = csv_string_to_list(hl.strip())
-    list_ll = csv_string_to_list(ll.strip())
-
-    if list_hl:
-        header = list_hl[0]
-        list_hl = list_hl[1:]
-    if list_ll:
-        header = list_ll[0]
-        list_ll = list_ll[1:]
-    if header is None:
-        return ""
-
-    if list_hl:
-        list_hl = [",".join(item[1:]) for item in list_hl if item]
-    if list_ll:
-        list_ll = [",".join(item[1:]) for item in list_ll if item]
-
-    combined_sources = []
-    seen = set()
-
-    for item in list_hl + list_ll:
-        if item and item not in seen:
-            combined_sources.append(item)
-            seen.add(item)
-
-    combined_sources_result = [",\t".join(header)]
-
-    for i, item in enumerate(combined_sources, start=1):
-        combined_sources_result.append(f"{i},\t{item}")
-
-    combined_sources_result = "\n".join(combined_sources_result)
-
-    return combined_sources_result
-
-
-async def get_best_cached_response(
-    hashing_kv,
-    current_embedding,
-    similarity_threshold=0.95,
-    mode="default",
-    use_llm_check=False,
-    llm_func=None,
-    original_prompt=None,
-    cache_type=None,
-) -> str | None:
-    logger.debug(
-        f"get_best_cached_response:  mode={mode} cache_type={cache_type} use_llm_check={use_llm_check}"
-    )
-    mode_cache = await hashing_kv.get_by_id(mode)
-    if not mode_cache:
-        return None
-
-    best_similarity = -1
-    best_response = None
-    best_prompt = None
-    best_cache_id = None
-
-    # Only iterate through cache entries for this mode
-    for cache_id, cache_data in mode_cache.items():
-        # Skip if cache_type doesn't match
-        if cache_type and cache_data.get("cache_type") != cache_type:
+    # Iterate through all input context lists
+    for context_list in context_lists:
+        if not context_list:  # Skip empty lists
             continue
+        for item in context_list:
+            content_dict = {
+                k: v for k, v in item.items() if k != "id" and k != "created_at"
+            }
+            content_key = tuple(sorted(content_dict.items()))
+            if content_key not in seen_content:
+                seen_content[content_key] = item
+                combined_data.append(item)
 
-        if cache_data["embedding"] is None:
-            continue
+    # Reassign IDs
+    for i, item in enumerate(combined_data):
+        item["id"] = str(i + 1)
 
-        # Convert cached embedding list to ndarray
-        cached_quantized = np.frombuffer(
-            bytes.fromhex(cache_data["embedding"]), dtype=np.uint8
-        ).reshape(cache_data["embedding_shape"])
-        cached_embedding = dequantize_embedding(
-            cached_quantized,
-            cache_data["embedding_min"],
-            cache_data["embedding_max"],
-        )
-
-        similarity = cosine_similarity(current_embedding, cached_embedding)
-        if similarity > best_similarity:
-            best_similarity = similarity
-            best_response = cache_data["return"]
-            best_prompt = cache_data["original_prompt"]
-            best_cache_id = cache_id
-
-    if best_similarity > similarity_threshold:
-        # If LLM check is enabled and all required parameters are provided
-        if (
-            use_llm_check
-            and llm_func
-            and original_prompt
-            and best_prompt
-            and best_response is not None
-        ):
-            compare_prompt = PROMPTS["similarity_check"].format(
-                original_prompt=original_prompt, cached_prompt=best_prompt
-            )
-
-            try:
-                llm_result = await llm_func(compare_prompt)
-                llm_result = llm_result.strip()
-                llm_similarity = float(llm_result)
-
-                # Replace vector similarity with LLM similarity score
-                best_similarity = llm_similarity
-                if best_similarity < similarity_threshold:
-                    log_data = {
-                        "event": "cache_rejected_by_llm",
-                        "type": cache_type,
-                        "mode": mode,
-                        "original_question": original_prompt[:100] + "..."
-                        if len(original_prompt) > 100
-                        else original_prompt,
-                        "cached_question": best_prompt[:100] + "..."
-                        if len(best_prompt) > 100
-                        else best_prompt,
-                        "similarity_score": round(best_similarity, 4),
-                        "threshold": similarity_threshold,
-                    }
-                    logger.debug(json.dumps(log_data, ensure_ascii=False))
-                    logger.info(f"Cache rejected by LLM(mode:{mode} tpye:{cache_type})")
-                    return None
-            except Exception as e:  # Catch all possible exceptions
-                logger.warning(f"LLM similarity check failed: {e}")
-                return None  # Return None directly when LLM check fails
-
-        prompt_display = (
-            best_prompt[:50] + "..." if len(best_prompt) > 50 else best_prompt
-        )
-        log_data = {
-            "event": "cache_hit",
-            "type": cache_type,
-            "mode": mode,
-            "similarity": round(best_similarity, 4),
-            "cache_id": best_cache_id,
-            "original_prompt": prompt_display,
-        }
-        logger.debug(json.dumps(log_data, ensure_ascii=False))
-        return best_response
-    return None
+    return combined_data
 
 
 def cosine_similarity(v1, v2):
@@ -627,6 +828,11 @@ def quantize_embedding(embedding: np.ndarray | list[float], bits: int = 8) -> tu
     min_val = embedding.min()
     max_val = embedding.max()
 
+    if min_val == max_val:
+        # handle constant vector
+        quantized = np.zeros_like(embedding, dtype=np.uint8)
+        return quantized, min_val, max_val
+
     # Quantize to 0-255 range
     scale = (2**bits - 1) / (max_val - min_val)
     quantized = np.round((embedding - min_val) * scale).astype(np.uint8)
@@ -638,6 +844,10 @@ def dequantize_embedding(
     quantized: np.ndarray, min_val: float, max_val: float, bits=8
 ) -> np.ndarray:
     """Restore quantized embedding"""
+    if min_val == max_val:
+        # handle constant vector
+        return np.full_like(quantized, min_val, dtype=np.float32)
+
     scale = (max_val - min_val) / (2**bits - 1)
     return (quantized * scale + min_val).astype(np.float32)
 
@@ -649,61 +859,25 @@ async def handle_cache(
     mode="default",
     cache_type=None,
 ):
-    """Generic cache handling function"""
+    """Generic cache handling function with flattened cache keys"""
     if hashing_kv is None:
         return None, None, None, None
 
     if mode != "default":  # handle cache for all type of query
         if not hashing_kv.global_config.get("enable_llm_cache"):
             return None, None, None, None
-
-        # Get embedding cache configuration
-        embedding_cache_config = hashing_kv.global_config.get(
-            "embedding_cache_config",
-            {"enabled": False, "similarity_threshold": 0.95, "use_llm_check": False},
-        )
-        is_embedding_cache_enabled = embedding_cache_config["enabled"]
-        use_llm_check = embedding_cache_config.get("use_llm_check", False)
-
-        quantized = min_val = max_val = None
-        if is_embedding_cache_enabled:  # Use embedding simularity to match cache
-            current_embedding = await hashing_kv.embedding_func([prompt])
-            llm_model_func = hashing_kv.global_config.get("llm_model_func")
-            quantized, min_val, max_val = quantize_embedding(current_embedding[0])
-            best_cached_response = await get_best_cached_response(
-                hashing_kv,
-                current_embedding[0],
-                similarity_threshold=embedding_cache_config["similarity_threshold"],
-                mode=mode,
-                use_llm_check=use_llm_check,
-                llm_func=llm_model_func if use_llm_check else None,
-                original_prompt=prompt,
-                cache_type=cache_type,
-            )
-            if best_cached_response is not None:
-                logger.debug(f"Embedding cached hit(mode:{mode} type:{cache_type})")
-                return best_cached_response, None, None, None
-            else:
-                # if caching keyword embedding is enabled, return the quantized embedding for saving it latter
-                logger.debug(f"Embedding cached missed(mode:{mode} type:{cache_type})")
-                return None, quantized, min_val, max_val
-
     else:  # handle cache for entity extraction
         if not hashing_kv.global_config.get("enable_llm_cache_for_entity_extract"):
             return None, None, None, None
 
-    # Here is the conditions of code reaching this point:
-    #     1. All query mode: enable_llm_cache is True and embedding simularity is not enabled
-    #     2. Entity extract: enable_llm_cache_for_entity_extract is True
-    if exists_func(hashing_kv, "get_by_mode_and_id"):
-        mode_cache = await hashing_kv.get_by_mode_and_id(mode, args_hash) or {}
-    else:
-        mode_cache = await hashing_kv.get_by_id(mode) or {}
-    if args_hash in mode_cache:
-        logger.debug(f"Non-embedding cached hit(mode:{mode} type:{cache_type})")
-        return mode_cache[args_hash]["return"], None, None, None
+    # Use flattened cache key format: {mode}:{cache_type}:{hash}
+    flattened_key = generate_cache_key(mode, cache_type, args_hash)
+    cache_entry = await hashing_kv.get_by_id(flattened_key)
+    if cache_entry:
+        logger.debug(f"Flattened cache hit(key:{flattened_key})")
+        return cache_entry["return"], None, None, None
 
-    logger.debug(f"Non-embedding cached missed(mode:{mode} type:{cache_type})")
+    logger.debug(f"Cache missed(mode:{mode} type:{cache_type})")
     return None, None, None, None
 
 
@@ -717,10 +891,11 @@ class CacheData:
     max_val: float | None = None
     mode: str = "default"
     cache_type: str = "query"
+    chunk_id: str | None = None
 
 
 async def save_to_cache(hashing_kv, cache_data: CacheData):
-    """Save data to cache, with improved handling for streaming responses and duplicate content.
+    """Save data to cache using flattened key structure.
 
     Args:
         hashing_kv: The key-value storage for caching
@@ -735,28 +910,24 @@ async def save_to_cache(hashing_kv, cache_data: CacheData):
         logger.debug("Streaming response detected, skipping cache")
         return
 
-    # Get existing cache data
-    if exists_func(hashing_kv, "get_by_mode_and_id"):
-        mode_cache = (
-            await hashing_kv.get_by_mode_and_id(cache_data.mode, cache_data.args_hash)
-            or {}
-        )
-    else:
-        mode_cache = await hashing_kv.get_by_id(cache_data.mode) or {}
+    # Use flattened cache key format: {mode}:{cache_type}:{hash}
+    flattened_key = generate_cache_key(
+        cache_data.mode, cache_data.cache_type, cache_data.args_hash
+    )
 
     # Check if we already have identical content cached
-    if cache_data.args_hash in mode_cache:
-        existing_content = mode_cache[cache_data.args_hash].get("return")
+    existing_cache = await hashing_kv.get_by_id(flattened_key)
+    if existing_cache:
+        existing_content = existing_cache.get("return")
         if existing_content == cache_data.content:
-            logger.info(
-                f"Cache content unchanged for {cache_data.args_hash}, skipping update"
-            )
+            logger.info(f"Cache content unchanged for {flattened_key}, skipping update")
             return
 
-    # Update cache with new content
-    mode_cache[cache_data.args_hash] = {
+    # Create cache entry with flattened structure
+    cache_entry = {
         "return": cache_data.content,
         "cache_type": cache_data.cache_type,
+        "chunk_id": cache_data.chunk_id if cache_data.chunk_id is not None else None,
         "embedding": cache_data.quantized.tobytes().hex()
         if cache_data.quantized is not None
         else None,
@@ -768,8 +939,10 @@ async def save_to_cache(hashing_kv, cache_data: CacheData):
         "original_prompt": cache_data.prompt,
     }
 
-    # Only upsert if there's actual new content
-    await hashing_kv.upsert({cache_data.mode: mode_cache})
+    logger.info(f" == LLM cache == saving: {flattened_key}")
+
+    # Save using flattened key
+    await hashing_kv.upsert({flattened_key: cache_entry})
 
 
 def safe_unicode_decode(content):
@@ -888,6 +1061,351 @@ def always_get_an_event_loop() -> asyncio.AbstractEventLoop:
         return new_loop
 
 
+async def aexport_data(
+    chunk_entity_relation_graph,
+    entities_vdb,
+    relationships_vdb,
+    output_path: str,
+    file_format: str = "csv",
+    include_vector_data: bool = False,
+) -> None:
+    """
+    Asynchronously exports all entities, relations, and relationships to various formats.
+
+    Args:
+        chunk_entity_relation_graph: Graph storage instance for entities and relations
+        entities_vdb: Vector database storage for entities
+        relationships_vdb: Vector database storage for relationships
+        output_path: The path to the output file (including extension).
+        file_format: Output format - "csv", "excel", "md", "txt".
+            - csv: Comma-separated values file
+            - excel: Microsoft Excel file with multiple sheets
+            - md: Markdown tables
+            - txt: Plain text formatted output
+        include_vector_data: Whether to include data from the vector database.
+    """
+    # Collect data
+    entities_data = []
+    relations_data = []
+    relationships_data = []
+
+    # --- Entities ---
+    all_entities = await chunk_entity_relation_graph.get_all_labels()
+    for entity_name in all_entities:
+        # Get entity information from graph
+        node_data = await chunk_entity_relation_graph.get_node(entity_name)
+        source_id = node_data.get("source_id") if node_data else None
+
+        entity_info = {
+            "graph_data": node_data,
+            "source_id": source_id,
+        }
+
+        # Optional: Get vector database information
+        if include_vector_data:
+            entity_id = compute_mdhash_id(entity_name, prefix="ent-")
+            vector_data = await entities_vdb.get_by_id(entity_id)
+            entity_info["vector_data"] = vector_data
+
+        entity_row = {
+            "entity_name": entity_name,
+            "source_id": source_id,
+            "graph_data": str(
+                entity_info["graph_data"]
+            ),  # Convert to string to ensure compatibility
+        }
+        if include_vector_data and "vector_data" in entity_info:
+            entity_row["vector_data"] = str(entity_info["vector_data"])
+        entities_data.append(entity_row)
+
+    # --- Relations ---
+    for src_entity in all_entities:
+        for tgt_entity in all_entities:
+            if src_entity == tgt_entity:
+                continue
+
+            edge_exists = await chunk_entity_relation_graph.has_edge(
+                src_entity, tgt_entity
+            )
+            if edge_exists:
+                # Get edge information from graph
+                edge_data = await chunk_entity_relation_graph.get_edge(
+                    src_entity, tgt_entity
+                )
+                source_id = edge_data.get("source_id") if edge_data else None
+
+                relation_info = {
+                    "graph_data": edge_data,
+                    "source_id": source_id,
+                }
+
+                # Optional: Get vector database information
+                if include_vector_data:
+                    rel_id = compute_mdhash_id(src_entity + tgt_entity, prefix="rel-")
+                    vector_data = await relationships_vdb.get_by_id(rel_id)
+                    relation_info["vector_data"] = vector_data
+
+                relation_row = {
+                    "src_entity": src_entity,
+                    "tgt_entity": tgt_entity,
+                    "source_id": relation_info["source_id"],
+                    "graph_data": str(relation_info["graph_data"]),  # Convert to string
+                }
+                if include_vector_data and "vector_data" in relation_info:
+                    relation_row["vector_data"] = str(relation_info["vector_data"])
+                relations_data.append(relation_row)
+
+    # --- Relationships (from VectorDB) ---
+    all_relationships = await relationships_vdb.client_storage
+    for rel in all_relationships["data"]:
+        relationships_data.append(
+            {
+                "relationship_id": rel["__id__"],
+                "data": str(rel),  # Convert to string for compatibility
+            }
+        )
+
+    # Export based on format
+    if file_format == "csv":
+        # CSV export
+        with open(output_path, "w", newline="", encoding="utf-8") as csvfile:
+            # Entities
+            if entities_data:
+                csvfile.write("# ENTITIES\n")
+                writer = csv.DictWriter(csvfile, fieldnames=entities_data[0].keys())
+                writer.writeheader()
+                writer.writerows(entities_data)
+                csvfile.write("\n\n")
+
+            # Relations
+            if relations_data:
+                csvfile.write("# RELATIONS\n")
+                writer = csv.DictWriter(csvfile, fieldnames=relations_data[0].keys())
+                writer.writeheader()
+                writer.writerows(relations_data)
+                csvfile.write("\n\n")
+
+            # Relationships
+            if relationships_data:
+                csvfile.write("# RELATIONSHIPS\n")
+                writer = csv.DictWriter(
+                    csvfile, fieldnames=relationships_data[0].keys()
+                )
+                writer.writeheader()
+                writer.writerows(relationships_data)
+
+    elif file_format == "excel":
+        # Excel export
+        import pandas as pd
+
+        entities_df = pd.DataFrame(entities_data) if entities_data else pd.DataFrame()
+        relations_df = (
+            pd.DataFrame(relations_data) if relations_data else pd.DataFrame()
+        )
+        relationships_df = (
+            pd.DataFrame(relationships_data) if relationships_data else pd.DataFrame()
+        )
+
+        with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
+            if not entities_df.empty:
+                entities_df.to_excel(writer, sheet_name="Entities", index=False)
+            if not relations_df.empty:
+                relations_df.to_excel(writer, sheet_name="Relations", index=False)
+            if not relationships_df.empty:
+                relationships_df.to_excel(
+                    writer, sheet_name="Relationships", index=False
+                )
+
+    elif file_format == "md":
+        # Markdown export
+        with open(output_path, "w", encoding="utf-8") as mdfile:
+            mdfile.write("# LightRAG Data Export\n\n")
+
+            # Entities
+            mdfile.write("## Entities\n\n")
+            if entities_data:
+                # Write header
+                mdfile.write("| " + " | ".join(entities_data[0].keys()) + " |\n")
+                mdfile.write(
+                    "| " + " | ".join(["---"] * len(entities_data[0].keys())) + " |\n"
+                )
+
+                # Write rows
+                for entity in entities_data:
+                    mdfile.write(
+                        "| " + " | ".join(str(v) for v in entity.values()) + " |\n"
+                    )
+                mdfile.write("\n\n")
+            else:
+                mdfile.write("*No entity data available*\n\n")
+
+            # Relations
+            mdfile.write("## Relations\n\n")
+            if relations_data:
+                # Write header
+                mdfile.write("| " + " | ".join(relations_data[0].keys()) + " |\n")
+                mdfile.write(
+                    "| " + " | ".join(["---"] * len(relations_data[0].keys())) + " |\n"
+                )
+
+                # Write rows
+                for relation in relations_data:
+                    mdfile.write(
+                        "| " + " | ".join(str(v) for v in relation.values()) + " |\n"
+                    )
+                mdfile.write("\n\n")
+            else:
+                mdfile.write("*No relation data available*\n\n")
+
+            # Relationships
+            mdfile.write("## Relationships\n\n")
+            if relationships_data:
+                # Write header
+                mdfile.write("| " + " | ".join(relationships_data[0].keys()) + " |\n")
+                mdfile.write(
+                    "| "
+                    + " | ".join(["---"] * len(relationships_data[0].keys()))
+                    + " |\n"
+                )
+
+                # Write rows
+                for relationship in relationships_data:
+                    mdfile.write(
+                        "| "
+                        + " | ".join(str(v) for v in relationship.values())
+                        + " |\n"
+                    )
+            else:
+                mdfile.write("*No relationship data available*\n\n")
+
+    elif file_format == "txt":
+        # Plain text export
+        with open(output_path, "w", encoding="utf-8") as txtfile:
+            txtfile.write("LIGHTRAG DATA EXPORT\n")
+            txtfile.write("=" * 80 + "\n\n")
+
+            # Entities
+            txtfile.write("ENTITIES\n")
+            txtfile.write("-" * 80 + "\n")
+            if entities_data:
+                # Create fixed width columns
+                col_widths = {
+                    k: max(len(k), max(len(str(e[k])) for e in entities_data))
+                    for k in entities_data[0]
+                }
+                header = "  ".join(k.ljust(col_widths[k]) for k in entities_data[0])
+                txtfile.write(header + "\n")
+                txtfile.write("-" * len(header) + "\n")
+
+                # Write rows
+                for entity in entities_data:
+                    row = "  ".join(
+                        str(v).ljust(col_widths[k]) for k, v in entity.items()
+                    )
+                    txtfile.write(row + "\n")
+                txtfile.write("\n\n")
+            else:
+                txtfile.write("No entity data available\n\n")
+
+            # Relations
+            txtfile.write("RELATIONS\n")
+            txtfile.write("-" * 80 + "\n")
+            if relations_data:
+                # Create fixed width columns
+                col_widths = {
+                    k: max(len(k), max(len(str(r[k])) for r in relations_data))
+                    for k in relations_data[0]
+                }
+                header = "  ".join(k.ljust(col_widths[k]) for k in relations_data[0])
+                txtfile.write(header + "\n")
+                txtfile.write("-" * len(header) + "\n")
+
+                # Write rows
+                for relation in relations_data:
+                    row = "  ".join(
+                        str(v).ljust(col_widths[k]) for k, v in relation.items()
+                    )
+                    txtfile.write(row + "\n")
+                txtfile.write("\n\n")
+            else:
+                txtfile.write("No relation data available\n\n")
+
+            # Relationships
+            txtfile.write("RELATIONSHIPS\n")
+            txtfile.write("-" * 80 + "\n")
+            if relationships_data:
+                # Create fixed width columns
+                col_widths = {
+                    k: max(len(k), max(len(str(r[k])) for r in relationships_data))
+                    for k in relationships_data[0]
+                }
+                header = "  ".join(
+                    k.ljust(col_widths[k]) for k in relationships_data[0]
+                )
+                txtfile.write(header + "\n")
+                txtfile.write("-" * len(header) + "\n")
+
+                # Write rows
+                for relationship in relationships_data:
+                    row = "  ".join(
+                        str(v).ljust(col_widths[k]) for k, v in relationship.items()
+                    )
+                    txtfile.write(row + "\n")
+            else:
+                txtfile.write("No relationship data available\n\n")
+
+    else:
+        raise ValueError(
+            f"Unsupported file format: {file_format}. "
+            f"Choose from: csv, excel, md, txt"
+        )
+    if file_format is not None:
+        print(f"Data exported to: {output_path} with format: {file_format}")
+    else:
+        print("Data displayed as table format")
+
+
+def export_data(
+    chunk_entity_relation_graph,
+    entities_vdb,
+    relationships_vdb,
+    output_path: str,
+    file_format: str = "csv",
+    include_vector_data: bool = False,
+) -> None:
+    """
+    Synchronously exports all entities, relations, and relationships to various formats.
+
+    Args:
+        chunk_entity_relation_graph: Graph storage instance for entities and relations
+        entities_vdb: Vector database storage for entities
+        relationships_vdb: Vector database storage for relationships
+        output_path: The path to the output file (including extension).
+        file_format: Output format - "csv", "excel", "md", "txt".
+            - csv: Comma-separated values file
+            - excel: Microsoft Excel file with multiple sheets
+            - md: Markdown tables
+            - txt: Plain text formatted output
+        include_vector_data: Whether to include data from the vector database.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    loop.run_until_complete(
+        aexport_data(
+            chunk_entity_relation_graph,
+            entities_vdb,
+            relationships_vdb,
+            output_path,
+            file_format,
+            include_vector_data,
+        )
+    )
+
+
 def lazy_external_import(module_name: str, class_name: str) -> Callable[..., Any]:
     """Lazily import a class from an external module based on the package of the caller."""
     # Get the caller's module and package
@@ -907,6 +1425,151 @@ def lazy_external_import(module_name: str, class_name: str) -> Callable[..., Any
     return import_class
 
 
+async def update_chunk_cache_list(
+    chunk_id: str,
+    text_chunks_storage: "BaseKVStorage",
+    cache_keys: list[str],
+    cache_scenario: str = "batch_update",
+) -> None:
+    """Update chunk's llm_cache_list with the given cache keys
+
+    Args:
+        chunk_id: Chunk identifier
+        text_chunks_storage: Text chunks storage instance
+        cache_keys: List of cache keys to add to the list
+        cache_scenario: Description of the cache scenario for logging
+    """
+    if not cache_keys:
+        return
+
+    try:
+        chunk_data = await text_chunks_storage.get_by_id(chunk_id)
+        if chunk_data:
+            # Ensure llm_cache_list exists
+            if "llm_cache_list" not in chunk_data:
+                chunk_data["llm_cache_list"] = []
+
+            # Add cache keys to the list if not already present
+            existing_keys = set(chunk_data["llm_cache_list"])
+            new_keys = [key for key in cache_keys if key not in existing_keys]
+
+            if new_keys:
+                chunk_data["llm_cache_list"].extend(new_keys)
+
+                # Update the chunk in storage
+                await text_chunks_storage.upsert({chunk_id: chunk_data})
+                logger.debug(
+                    f"Updated chunk {chunk_id} with {len(new_keys)} cache keys ({cache_scenario})"
+                )
+    except Exception as e:
+        logger.warning(
+            f"Failed to update chunk {chunk_id} with cache references on {cache_scenario}: {e}"
+        )
+
+
+def remove_think_tags(text: str) -> str:
+    """Remove <think> tags from the text"""
+    return re.sub(r"^(<think>.*?</think>|<think>)", "", text, flags=re.DOTALL).strip()
+
+
+async def use_llm_func_with_cache(
+    input_text: str,
+    use_llm_func: callable,
+    llm_response_cache: "BaseKVStorage | None" = None,
+    max_tokens: int = None,
+    history_messages: list[dict[str, str]] = None,
+    cache_type: str = "extract",
+    chunk_id: str | None = None,
+    cache_keys_collector: list = None,
+) -> str:
+    """Call LLM function with cache support
+
+    If cache is available and enabled (determined by handle_cache based on mode),
+    retrieve result from cache; otherwise call LLM function and save result to cache.
+
+    Args:
+        input_text: Input text to send to LLM
+        use_llm_func: LLM function with higher priority
+        llm_response_cache: Cache storage instance
+        max_tokens: Maximum tokens for generation
+        history_messages: History messages list
+        cache_type: Type of cache
+        chunk_id: Chunk identifier to store in cache
+        text_chunks_storage: Text chunks storage to update llm_cache_list
+        cache_keys_collector: Optional list to collect cache keys for batch processing
+
+    Returns:
+        LLM response text
+    """
+    if llm_response_cache:
+        if history_messages:
+            history = json.dumps(history_messages, ensure_ascii=False)
+            _prompt = history + "\n" + input_text
+        else:
+            _prompt = input_text
+
+        arg_hash = compute_args_hash(_prompt)
+        # Generate cache key for this LLM call
+        cache_key = generate_cache_key("default", cache_type, arg_hash)
+
+        cached_return, _1, _2, _3 = await handle_cache(
+            llm_response_cache,
+            arg_hash,
+            _prompt,
+            "default",
+            cache_type=cache_type,
+        )
+        if cached_return:
+            logger.debug(f"Found cache for {arg_hash}")
+            statistic_data["llm_cache"] += 1
+
+            # Add cache key to collector if provided
+            if cache_keys_collector is not None:
+                cache_keys_collector.append(cache_key)
+
+            return cached_return
+        statistic_data["llm_call"] += 1
+
+        # Call LLM
+        kwargs = {}
+        if history_messages:
+            kwargs["history_messages"] = history_messages
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+
+        res: str = await use_llm_func(input_text, **kwargs)
+        res = remove_think_tags(res)
+
+        if llm_response_cache.global_config.get("enable_llm_cache_for_entity_extract"):
+            await save_to_cache(
+                llm_response_cache,
+                CacheData(
+                    args_hash=arg_hash,
+                    content=res,
+                    prompt=_prompt,
+                    cache_type=cache_type,
+                    chunk_id=chunk_id,
+                ),
+            )
+
+            # Add cache key to collector if provided
+            if cache_keys_collector is not None:
+                cache_keys_collector.append(cache_key)
+
+        return res
+
+    # When cache is disabled, directly call LLM
+    kwargs = {}
+    if history_messages:
+        kwargs["history_messages"] = history_messages
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+
+    logger.info(f"Call LLM function with query text length: {len(input_text)}")
+    res = await use_llm_func(input_text, **kwargs)
+    return remove_think_tags(res)
+
+
 def get_content_summary(content: str, max_length: int = 250) -> str:
     """Get summary of document content
 
@@ -921,6 +1584,60 @@ def get_content_summary(content: str, max_length: int = 250) -> str:
     if len(content) <= max_length:
         return content
     return content[:max_length] + "..."
+
+
+def normalize_extracted_info(name: str, is_entity=False) -> str:
+    """Normalize entity/relation names and description with the following rules:
+    1. Remove spaces between Chinese characters
+    2. Remove spaces between Chinese characters and English letters/numbers
+    3. Preserve spaces within English text and numbers
+    4. Replace Chinese parentheses with English parentheses
+    5. Replace Chinese dash with English dash
+    6. Remove English quotation marks from the beginning and end of the text
+    7. Remove English quotation marks in and around chinese
+    8. Remove Chinese quotation marks
+
+    Args:
+        name: Entity name to normalize
+
+    Returns:
+        Normalized entity name
+    """
+    # Replace Chinese parentheses with English parentheses
+    name = name.replace("（", "(").replace("）", ")")
+
+    # Replace Chinese dash with English dash
+    name = name.replace("—", "-").replace("－", "-")
+
+    # Use regex to remove spaces between Chinese characters
+    # Regex explanation:
+    # (?<=[\u4e00-\u9fa5]): Positive lookbehind for Chinese character
+    # \s+: One or more whitespace characters
+    # (?=[\u4e00-\u9fa5]): Positive lookahead for Chinese character
+    name = re.sub(r"(?<=[\u4e00-\u9fa5])\s+(?=[\u4e00-\u9fa5])", "", name)
+
+    # Remove spaces between Chinese and English/numbers/symbols
+    name = re.sub(
+        r"(?<=[\u4e00-\u9fa5])\s+(?=[a-zA-Z0-9\(\)\[\]@#$%!&\*\-=+_])", "", name
+    )
+    name = re.sub(
+        r"(?<=[a-zA-Z0-9\(\)\[\]@#$%!&\*\-=+_])\s+(?=[\u4e00-\u9fa5])", "", name
+    )
+
+    # Remove English quotation marks from the beginning and end
+    if len(name) >= 2 and name.startswith('"') and name.endswith('"'):
+        name = name[1:-1]
+    if len(name) >= 2 and name.startswith("'") and name.endswith("'"):
+        name = name[1:-1]
+
+    if is_entity:
+        # remove Chinese quotes
+        name = name.replace("“", "").replace("”", "").replace("‘", "").replace("’", "")
+        # remove English queotes in and around chinese
+        name = re.sub(r"['\"]+(?=[\u4e00-\u9fa5])", "", name)
+        name = re.sub(r"(?<=[\u4e00-\u9fa5])['\"]+", "", name)
+
+    return name
 
 
 def clean_text(text: str) -> str:

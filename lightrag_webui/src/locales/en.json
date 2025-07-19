@@ -32,16 +32,55 @@
     "authDisabled": "Authentication is disabled. Using login free mode.",
     "guestMode": "Login Free"
   },
+  "common": {
+    "cancel": "Cancel",
+    "save": "Save",
+    "saving": "Saving...",
+    "saveFailed": "Save failed"
+  },
   "documentPanel": {
     "clearDocuments": {
       "button": "Clear",
       "tooltip": "Clear documents",
       "title": "Clear Documents",
+      "description": "This will remove all documents from the system",
+      "warning": "WARNING: This action will permanently delete all documents and cannot be undone!",
       "confirm": "Do you really want to clear all documents?",
+      "confirmPrompt": "Type 'yes' to confirm this action",
+      "confirmPlaceholder": "Type yes to confirm",
+      "clearCache": "Clear LLM cache",
       "confirmButton": "YES",
       "success": "Documents cleared successfully",
+      "cacheCleared": "Cache cleared successfully",
+      "cacheClearFailed": "Failed to clear cache:\n{{error}}",
       "failed": "Clear Documents Failed:\n{{message}}",
       "error": "Clear Documents Failed:\n{{error}}"
+    },
+    "deleteDocuments": {
+      "button": "Delete",
+      "tooltip": "Delete selected documents",
+      "title": "Delete Documents",
+      "description": "This will permanently delete the selected documents from the system",
+      "warning": "WARNING: This action will permanently delete the selected documents and cannot be undone!",
+      "confirm": "Do you really want to delete {{count}} selected document(s)?",
+      "confirmPrompt": "Type 'yes' to confirm this action",
+      "confirmPlaceholder": "Type yes to confirm",
+      "confirmButton": "YES",
+      "deleteFileOption": "Also delete uploaded files",
+      "deleteFileTooltip": "Check this option to also delete the corresponding uploaded files on the server",
+      "success": "Document deletion pipeline started successfully",
+      "failed": "Delete Documents Failed:\n{{message}}",
+      "error": "Delete Documents Failed:\n{{error}}",
+      "busy": "Pipeline is busy, please try again later",
+      "notAllowed": "No permission to perform this operation",
+      "cannotDeleteAll": "Cannot delete all documents. If you need to delete all documents, please use the Clear Documents feature."
+    },
+    "deselectDocuments": {
+      "button": "Deselect",
+      "tooltip": "Deselect all selected documents",
+      "title": "Deselect Documents",
+      "description": "This will clear all selected documents ({{count}} selected)",
+      "confirmButton": "Deselect All"
     },
     "uploadDocuments": {
       "button": "Upload",
@@ -92,9 +131,11 @@
         "chunks": "Chunks",
         "created": "Created",
         "updated": "Updated",
-        "metadata": "Metadata"
+        "metadata": "Metadata",
+        "select": "Select"
       },
       "status": {
+        "all": "All",
         "completed": "Completed",
         "processing": "Processing",
         "pending": "Pending",
@@ -127,6 +168,27 @@
     }
   },
   "graphPanel": {
+    "dataIsTruncated": "Graph data is truncated to Max Nodes",
+    "statusDialog": {
+      "title": "LightRAG Server Settings",
+      "description": "View current system status and connection information"
+    },
+    "legend": "Legend",
+    "nodeTypes": {
+      "person": "Person",
+      "category": "Category",
+      "geo": "Geographic",
+      "location": "Location",
+      "organization": "Organization",
+      "event": "Event",
+      "equipment": "Equipment",
+      "weapon": "Weapon",
+      "animal": "Animal",
+      "unknown": "Unknown",
+      "object": "Object",
+      "group": "Group",
+      "technology": "Technology"
+    },
     "sideBar": {
       "settings": {
         "settings": "Settings",
@@ -139,9 +201,12 @@
         "hideUnselectedEdges": "Hide Unselected Edges",
         "edgeEvents": "Edge Events",
         "maxQueryDepth": "Max Query Depth",
-        "minDegree": "Minimum Degree",
+        "maxNodes": "Max Nodes",
         "maxLayoutIterations": "Max Layout Iterations",
-        "depth": "Depth",
+        "resetToDefault": "Reset to default",
+        "edgeSizeRange": "Edge Size Range",
+        "depth": "D",
+        "max": "Max",
         "degree": "Degree",
         "apiKey": "API Key",
         "enterYourAPIkey": "Enter your API key",
@@ -171,6 +236,9 @@
       "fullScreenControl": {
         "fullScreen": "Full Screen",
         "windowed": "Windowed"
+      },
+      "legendControl": {
+        "toggleLegend": "Toggle Legend"
       }
     },
     "statusIndicator": {
@@ -184,20 +252,37 @@
       "inputDirectory": "Input Directory",
       "llmConfig": "LLM Configuration",
       "llmBinding": "LLM Binding",
-      "llmBindingHost": "LLM Binding Host",
+      "llmBindingHost": "LLM Endpoint",
       "llmModel": "LLM Model",
       "maxTokens": "Max Tokens",
       "embeddingConfig": "Embedding Configuration",
       "embeddingBinding": "Embedding Binding",
-      "embeddingBindingHost": "Embedding Binding Host",
+      "embeddingBindingHost": "Embedding Endpoint",
       "embeddingModel": "Embedding Model",
       "storageConfig": "Storage Configuration",
       "kvStorage": "KV Storage",
       "docStatusStorage": "Doc Status Storage",
       "graphStorage": "Graph Storage",
-      "vectorStorage": "Vector Storage"
+      "vectorStorage": "Vector Storage",
+      "workspace": "Workspace",
+      "maxGraphNodes": "Max Graph Nodes",
+      "rerankerConfig": "Reranker Configuration",
+      "rerankerBindingHost": "Reranker Endpoint",
+      "rerankerModel": "Reranker Model",
+      "lockStatus": "Lock Status"
     },
     "propertiesView": {
+      "editProperty": "Edit {{property}}",
+      "editPropertyDescription": "Edit the property value in the text area below.",
+      "errors": {
+        "duplicateName": "Node name already exists",
+        "updateFailed": "Failed to update node",
+        "tryAgainLater": "Please try again later"
+      },
+      "success": {
+        "entityUpdated": "Node updated successfully",
+        "relationUpdated": "Relation updated successfully"
+      },
       "node": {
         "title": "Node",
         "id": "ID",
@@ -216,7 +301,9 @@
           "entity_type": "Type",
           "source_id": "SrcID",
           "Neighbour": "Neigh",
-          "file_path": "Source"
+          "file_path": "Source",
+          "keywords": "Keys",
+          "weight": "Weight"
         }
       },
       "edge": {
@@ -238,9 +325,9 @@
       "label": "Label",
       "placeholder": "Search labels...",
       "andOthers": "And {count} others",
-      "refreshTooltip": "Reload graph data"
+      "refreshTooltip": "Reload data(After file added)"
     },
-    "emptyGraph": "Graph Is Empty"
+    "emptyGraph": "Empty(Try Reload Again)"
   },
   "retrievePanel": {
     "chatMessage": {
@@ -251,20 +338,23 @@
       "startPrompt": "Start a retrieval by typing your query below",
       "clear": "Clear",
       "send": "Send",
-      "placeholder": "Type your query...",
-      "error": "Error: Failed to get response"
+      "placeholder": "Enter your query (Support prefix: /<Query Mode>)",
+      "error": "Error: Failed to get response",
+      "queryModeError": "Only supports the following query modes: {{modes}}",
+      "queryModePrefixInvalid": "Invalid query mode prefix. Use: /<mode> [space] your query"
     },
     "querySettings": {
       "parametersTitle": "Parameters",
       "parametersDescription": "Configure your query parameters",
       "queryMode": "Query Mode",
-      "queryModeTooltip": "Select the retrieval strategy:\n• Naive: Basic search without advanced techniques\n• Local: Context-dependent information retrieval\n• Global: Utilizes global knowledge base\n• Hybrid: Combines local and global retrieval\n• Mix: Integrates knowledge graph with vector retrieval",
+      "queryModeTooltip": "Select the retrieval strategy:\n• Naive: Basic search without advanced techniques\n• Local: Context-dependent information retrieval\n• Global: Utilizes global knowledge base\n• Hybrid: Combines local and global retrieval\n• Mix: Integrates knowledge graph with vector retrieval\n• Bypass: Passes query directly to LLM without retrieval",
       "queryModeOptions": {
         "naive": "Naive",
         "local": "Local",
         "global": "Global",
         "hybrid": "Hybrid",
-        "mix": "Mix"
+        "mix": "Mix",
+        "bypass": "Bypass"
       },
       "responseFormat": "Response Format",
       "responseFormatTooltip": "Defines the response format. Examples:\n• Multiple Paragraphs\n• Single Paragraph\n• Bullet Points",
@@ -273,29 +363,32 @@
         "singleParagraph": "Single Paragraph",
         "bulletPoints": "Bullet Points"
       },
-      "topK": "Top K Results",
-      "topKTooltip": "Number of top items to retrieve. Represents entities in 'local' mode and relationships in 'global' mode",
-      "topKPlaceholder": "Number of results",
-      "maxTokensTextUnit": "Max Tokens for Text Unit",
-      "maxTokensTextUnitTooltip": "Maximum number of tokens allowed for each retrieved text chunk",
-      "maxTokensGlobalContext": "Max Tokens for Global Context",
-      "maxTokensGlobalContextTooltip": "Maximum number of tokens allocated for relationship descriptions in global retrieval",
-      "maxTokensLocalContext": "Max Tokens for Local Context",
-      "maxTokensLocalContextTooltip": "Maximum number of tokens allocated for entity descriptions in local retrieval",
+      "topK": "KG Top K",
+      "topKTooltip": "Number of entities and relations to retrieve. Applicable for non-naive modes.",
+      "topKPlaceholder": "Enter top_k value",
+      "chunkTopK": "Chunk Top K",
+      "chunkTopKTooltip": "Number of text chunks to retrieve, applicable for all modes.",
+      "chunkTopKPlaceholder": "Enter chunk_top_k value",
+      "maxEntityTokens": "Max Entity Tokens",
+      "maxEntityTokensTooltip": "Maximum number of tokens allocated for entity context in unified token control system",
+      "maxRelationTokens": "Max Relation Tokens",
+      "maxRelationTokensTooltip": "Maximum number of tokens allocated for relationship context in unified token control system",
+      "maxTotalTokens": "Max Total Tokens",
+      "maxTotalTokensTooltip": "Maximum total tokens budget for the entire query context (entities + relations + chunks + system prompt)",
       "historyTurns": "History Turns",
       "historyTurnsTooltip": "Number of complete conversation turns (user-assistant pairs) to consider in the response context",
       "historyTurnsPlaceholder": "Number of history turns",
-      "hlKeywords": "High-Level Keywords",
-      "hlKeywordsTooltip": "List of high-level keywords to prioritize in retrieval. Separate with commas",
-      "hlkeywordsPlaceHolder": "Enter keywords",
-      "llKeywords": "Low-Level Keywords",
-      "llKeywordsTooltip": "List of low-level keywords to refine retrieval focus. Separate with commas",
       "onlyNeedContext": "Only Need Context",
       "onlyNeedContextTooltip": "If True, only returns the retrieved context without generating a response",
       "onlyNeedPrompt": "Only Need Prompt",
       "onlyNeedPromptTooltip": "If True, only returns the generated prompt without producing a response",
       "streamResponse": "Stream Response",
-      "streamResponseTooltip": "If True, enables streaming output for real-time responses"
+      "streamResponseTooltip": "If True, enables streaming output for real-time responses",
+      "userPrompt": "User Prompt",
+      "userPromptTooltip": "Provide additional response requirements to the LLM (unrelated to query content, only for output processing).",
+      "userPromptPlaceholder": "Enter custom prompt (optional)",
+      "enableRerank": "Enable Rerank",
+      "enableRerankTooltip": "Enable reranking for retrieved text chunks. If True but no rerank model is configured, a warning will be issued. Default is True."
     }
   },
   "apiSite": {

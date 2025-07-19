@@ -8,17 +8,15 @@ import uuid
 from ..utils import logger
 from ..base import BaseVectorStorage
 import configparser
-
-
-config = configparser.ConfigParser()
-config.read("config.ini", "utf-8")
-
 import pipmaster as pm
 
 if not pm.is_installed("qdrant-client"):
     pm.install("qdrant-client")
 
-from qdrant_client import QdrantClient, models
+from qdrant_client import QdrantClient, models  # type: ignore
+
+config = configparser.ConfigParser()
+config.read("config.ini", "utf-8")
 
 
 def compute_mdhash_id_for_qdrant(
@@ -52,6 +50,18 @@ def compute_mdhash_id_for_qdrant(
 @final
 @dataclass
 class QdrantVectorDBStorage(BaseVectorStorage):
+    def __init__(
+        self, namespace, global_config, embedding_func, workspace=None, meta_fields=None
+    ):
+        super().__init__(
+            namespace=namespace,
+            workspace=workspace or "",
+            global_config=global_config,
+            embedding_func=embedding_func,
+            meta_fields=meta_fields or set(),
+        )
+        self.__post_init__()
+
     @staticmethod
     def create_collection_if_not_exist(
         client: QdrantClient, collection_name: str, **kwargs
@@ -61,6 +71,29 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         client.create_collection(collection_name, **kwargs)
 
     def __post_init__(self):
+        # Check for QDRANT_WORKSPACE environment variable first (higher priority)
+        # This allows administrators to force a specific workspace for all Qdrant storage instances
+        qdrant_workspace = os.environ.get("QDRANT_WORKSPACE")
+        if qdrant_workspace and qdrant_workspace.strip():
+            # Use environment variable value, overriding the passed workspace parameter
+            effective_workspace = qdrant_workspace.strip()
+            logger.info(
+                f"Using QDRANT_WORKSPACE environment variable: '{effective_workspace}' (overriding passed workspace: '{self.workspace}')"
+            )
+        else:
+            # Use the workspace parameter passed during initialization
+            effective_workspace = self.workspace
+            if effective_workspace:
+                logger.debug(
+                    f"Using passed workspace parameter: '{effective_workspace}'"
+                )
+
+        # Build namespace with workspace prefix for data isolation
+        if effective_workspace:
+            self.namespace = f"{effective_workspace}_{self.namespace}"
+            logger.debug(f"Final namespace with workspace prefix: '{self.namespace}'")
+        # When workspace is empty, keep the original namespace unchanged
+
         kwargs = self.global_config.get("vector_db_storage_cls_kwargs", {})
         cosine_threshold = kwargs.get("cosine_better_than_threshold")
         if cosine_threshold is None:
@@ -87,12 +120,18 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         )
 
     async def upsert(self, data: dict[str, dict[str, Any]]) -> None:
-        logger.info(f"Inserting {len(data)} to {self.namespace}")
+        logger.debug(f"Inserting {len(data)} to {self.namespace}")
         if not data:
             return
+
+        import time
+
+        current_time = int(time.time())
+
         list_data = [
             {
                 "id": k,
+                "created_at": current_time,
                 **{k1: v1 for k1, v1 in v.items() if k1 in self.meta_fields},
             }
             for k, v in data.items()
@@ -126,7 +165,9 @@ class QdrantVectorDBStorage(BaseVectorStorage):
     async def query(
         self, query: str, top_k: int, ids: list[str] | None = None
     ) -> list[dict[str, Any]]:
-        embedding = await self.embedding_func([query])
+        embedding = await self.embedding_func(
+            [query], _priority=5
+        )  # higher priority for query
         results = self._client.search(
             collection_name=self.namespace,
             query_vector=embedding[0],
@@ -137,7 +178,14 @@ class QdrantVectorDBStorage(BaseVectorStorage):
 
         logger.debug(f"query result: {results}")
 
-        return [{**dp.payload, "distance": dp.score} for dp in results]
+        return [
+            {
+                **dp.payload,
+                "distance": dp.score,
+                "created_at": dp.payload.get("created_at"),
+            }
+            for dp in results
+        ]
 
     async def index_done_callback(self) -> None:
         # Qdrant handles persistence automatically
@@ -236,42 +284,104 @@ class QdrantVectorDBStorage(BaseVectorStorage):
         except Exception as e:
             logger.error(f"Error deleting relations for {entity_name}: {e}")
 
-    async def search_by_prefix(self, prefix: str) -> list[dict[str, Any]]:
-        """Search for records with IDs starting with a specific prefix.
+    async def get_by_id(self, id: str) -> dict[str, Any] | None:
+        """Get vector data by its ID
 
         Args:
-            prefix: The prefix to search for in record IDs
+            id: The unique identifier of the vector
 
         Returns:
-            List of records with matching ID prefixes
+            The vector data if found, or None if not found
         """
         try:
-            # Use scroll method to find records with IDs starting with the prefix
-            results = self._client.scroll(
+            # Convert to Qdrant compatible ID
+            qdrant_id = compute_mdhash_id_for_qdrant(id)
+
+            # Retrieve the point by ID
+            result = self._client.retrieve(
                 collection_name=self.namespace,
-                scroll_filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="id", match=models.MatchText(text=prefix, prefix=True)
-                        )
-                    ]
-                ),
+                ids=[qdrant_id],
                 with_payload=True,
-                with_vectors=False,
-                limit=1000,  # Adjust as needed for your use case
             )
 
-            # Extract matching points
-            matching_records = results[0]
+            if not result:
+                return None
 
-            # Format the results to match expected return format
-            formatted_results = [{**point.payload} for point in matching_records]
+            # Ensure the result contains created_at field
+            payload = result[0].payload
+            if "created_at" not in payload:
+                payload["created_at"] = None
 
-            logger.debug(
-                f"Found {len(formatted_results)} records with prefix '{prefix}'"
-            )
-            return formatted_results
-
+            return payload
         except Exception as e:
-            logger.error(f"Error searching for prefix '{prefix}': {e}")
+            logger.error(f"Error retrieving vector data for ID {id}: {e}")
+            return None
+
+    async def get_by_ids(self, ids: list[str]) -> list[dict[str, Any]]:
+        """Get multiple vector data by their IDs
+
+        Args:
+            ids: List of unique identifiers
+
+        Returns:
+            List of vector data objects that were found
+        """
+        if not ids:
             return []
+
+        try:
+            # Convert to Qdrant compatible IDs
+            qdrant_ids = [compute_mdhash_id_for_qdrant(id) for id in ids]
+
+            # Retrieve the points by IDs
+            results = self._client.retrieve(
+                collection_name=self.namespace,
+                ids=qdrant_ids,
+                with_payload=True,
+            )
+
+            # Ensure each result contains created_at field
+            payloads = []
+            for point in results:
+                payload = point.payload
+                if "created_at" not in payload:
+                    payload["created_at"] = None
+                payloads.append(payload)
+
+            return payloads
+        except Exception as e:
+            logger.error(f"Error retrieving vector data for IDs {ids}: {e}")
+            return []
+
+    async def drop(self) -> dict[str, str]:
+        """Drop all vector data from storage and clean up resources
+
+        This method will delete all data from the Qdrant collection.
+
+        Returns:
+            dict[str, str]: Operation status and message
+            - On success: {"status": "success", "message": "data dropped"}
+            - On failure: {"status": "error", "message": "<error details>"}
+        """
+        try:
+            # Delete the collection and recreate it
+            if self._client.collection_exists(self.namespace):
+                self._client.delete_collection(self.namespace)
+
+            # Recreate the collection
+            QdrantVectorDBStorage.create_collection_if_not_exist(
+                self._client,
+                self.namespace,
+                vectors_config=models.VectorParams(
+                    size=self.embedding_func.embedding_dim,
+                    distance=models.Distance.COSINE,
+                ),
+            )
+
+            logger.info(
+                f"Process {os.getpid()} drop Qdrant collection {self.namespace}"
+            )
+            return {"status": "success", "message": "data dropped"}
+        except Exception as e:
+            logger.error(f"Error dropping Qdrant collection {self.namespace}: {e}")
+            return {"status": "error", "message": str(e)}

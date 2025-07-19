@@ -49,6 +49,10 @@ inputs/
 rag_storage/
 examples/input/
 examples/output/
+output*/
+jdk-17.0.14/
+datasets/
+raw_inputs/
 
 # Miscellaneous
 .DS_Store
@@ -59,6 +63,8 @@ ignore_this.txt
 # Project-specific files
 dickens*/
 book.txt
+LightRAG.pdf
+download_models_hf.py
 lightrag-dev/
 gui/
 

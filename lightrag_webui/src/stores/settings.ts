@@ -5,7 +5,7 @@ import { defaultQueryLabel } from '@/lib/constants'
 import { Message, QueryRequest } from '@/api/lightrag'
 
 type Theme = 'dark' | 'light' | 'system'
-type Language = 'en' | 'zh' | 'fr' | 'ar'
+type Language = 'en' | 'zh' | 'fr' | 'ar' | 'zh_TW'
 type Tab = 'documents' | 'knowledge-graph' | 'retrieval' | 'api'
 
 interface SettingsState {
@@ -16,6 +16,8 @@ interface SettingsState {
   // Graph viewer settings
   showPropertyPanel: boolean
   showNodeSearchBar: boolean
+  showLegend: boolean
+  setShowLegend: (show: boolean) => void
 
   showNodeLabel: boolean
   enableNodeDrag: boolean
@@ -24,11 +26,20 @@ interface SettingsState {
   enableHideUnselectedEdges: boolean
   enableEdgeEvents: boolean
 
+  minEdgeSize: number
+  setMinEdgeSize: (size: number) => void
+
+  maxEdgeSize: number
+  setMaxEdgeSize: (size: number) => void
+
   graphQueryMaxDepth: number
   setGraphQueryMaxDepth: (depth: number) => void
 
-  graphMinDegree: number
-  setGraphMinDegree: (degree: number) => void
+  graphMaxNodes: number
+  setGraphMaxNodes: (nodes: number, triggerRefresh?: boolean) => void
+
+  backendMaxGraphNodes: number | null
+  setBackendMaxGraphNodes: (maxNodes: number | null) => void
 
   graphLayoutMaxIterations: number
   setGraphLayoutMaxIterations: (iterations: number) => void
@@ -68,6 +79,7 @@ const useSettingsStoreBase = create<SettingsState>()(
       language: 'en',
       showPropertyPanel: true,
       showNodeSearchBar: true,
+      showLegend: false,
 
       showNodeLabel: true,
       enableNodeDrag: true,
@@ -76,8 +88,12 @@ const useSettingsStoreBase = create<SettingsState>()(
       enableHideUnselectedEdges: true,
       enableEdgeEvents: false,
 
+      minEdgeSize: 1,
+      maxEdgeSize: 1,
+
       graphQueryMaxDepth: 3,
-      graphMinDegree: 0,
+      graphMaxNodes: 1000,
+      backendMaxGraphNodes: null,
       graphLayoutMaxIterations: 15,
 
       queryLabel: defaultQueryLabel,
@@ -94,16 +110,17 @@ const useSettingsStoreBase = create<SettingsState>()(
       querySettings: {
         mode: 'global',
         response_type: 'Multiple Paragraphs',
-        top_k: 10,
-        max_token_for_text_unit: 4000,
-        max_token_for_global_context: 4000,
-        max_token_for_local_context: 4000,
+        top_k: 40,
+        chunk_top_k: 10,
+        max_entity_tokens: 10000,
+        max_relation_tokens: 10000,
+        max_total_tokens: 32000,
         only_need_context: false,
         only_need_prompt: false,
         stream: true,
         history_turns: 3,
-        hl_keywords: [],
-        ll_keywords: []
+        user_prompt: '',
+        enable_rerank: true
       },
 
       setTheme: (theme: Theme) => set({ theme }),
@@ -130,7 +147,31 @@ const useSettingsStoreBase = create<SettingsState>()(
 
       setGraphQueryMaxDepth: (depth: number) => set({ graphQueryMaxDepth: depth }),
 
-      setGraphMinDegree: (degree: number) => set({ graphMinDegree: degree }),
+      setGraphMaxNodes: (nodes: number, triggerRefresh: boolean = false) => {
+        const state = useSettingsStore.getState();
+        if (state.graphMaxNodes === nodes) {
+          return;
+        }
+
+        if (triggerRefresh) {
+          const currentLabel = state.queryLabel;
+          // Atomically update both the node count and the query label to trigger a refresh.
+          set({ graphMaxNodes: nodes, queryLabel: '' });
+
+          // Restore the label after a short delay.
+          setTimeout(() => {
+            set({ queryLabel: currentLabel });
+          }, 300);
+        } else {
+          set({ graphMaxNodes: nodes });
+        }
+      },
+
+      setBackendMaxGraphNodes: (maxNodes: number | null) => set({ backendMaxGraphNodes: maxNodes }),
+
+      setMinEdgeSize: (size: number) => set({ minEdgeSize: size }),
+
+      setMaxEdgeSize: (size: number) => set({ maxEdgeSize: size }),
 
       setEnableHealthCheck: (enable: boolean) => set({ enableHealthCheck: enable }),
 
@@ -145,12 +186,13 @@ const useSettingsStoreBase = create<SettingsState>()(
           querySettings: { ...state.querySettings, ...settings }
         })),
 
-      setShowFileName: (show: boolean) => set({ showFileName: show })
+      setShowFileName: (show: boolean) => set({ showFileName: show }),
+      setShowLegend: (show: boolean) => set({ showLegend: show })
     }),
     {
       name: 'settings-storage',
       storage: createJSONStorage(() => localStorage),
-      version: 9,
+      version: 15,
       migrate: (state: any, version: number) => {
         if (version < 2) {
           state.showEdgeLabel = false
@@ -195,6 +237,43 @@ const useSettingsStoreBase = create<SettingsState>()(
         }
         if (version < 9) {
           state.showFileName = false
+        }
+        if (version < 10) {
+          delete state.graphMinDegree // 删除废弃参数
+          state.graphMaxNodes = 1000  // 添加新参数
+        }
+        if (version < 11) {
+          state.minEdgeSize = 1
+          state.maxEdgeSize = 1
+        }
+        if (version < 12) {
+          // Clear retrieval history to avoid compatibility issues with MessageWithError type
+          state.retrievalHistory = []
+        }
+        if (version < 13) {
+          // Add user_prompt field for older versions
+          if (state.querySettings) {
+            state.querySettings.user_prompt = ''
+          }
+        }
+        if (version < 14) {
+          // Add backendMaxGraphNodes field for older versions
+          state.backendMaxGraphNodes = null
+        }
+        if (version < 15) {
+          // Add new querySettings
+          state.querySettings = {
+            ...state.querySettings,
+            mode: 'mix',
+            response_type: 'Multiple Paragraphs',
+            top_k: 40,
+            chunk_top_k: 10,
+            max_entity_tokens: 10000,
+            max_relation_tokens: 10000,
+            max_total_tokens: 32000,
+            enable_rerank: true,
+            history_turns: 0,
+          }
         }
         return state
       }

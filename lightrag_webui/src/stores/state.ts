@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { createSelectors } from '@/lib/utils'
 import { checkHealth, LightragStatus } from '@/api/lightrag'
+import { useSettingsStore } from './settings'
 
 interface BackendState {
   health: boolean
@@ -22,10 +23,13 @@ interface AuthState {
   coreVersion: string | null;
   apiVersion: string | null;
   username: string | null; // login username
+  webuiTitle: string | null; // Custom title
+  webuiDescription: string | null; // Title description
 
-  login: (token: string, isGuest?: boolean, coreVersion?: string | null, apiVersion?: string | null) => void;
+  login: (token: string, isGuest?: boolean, coreVersion?: string | null, apiVersion?: string | null, webuiTitle?: string | null, webuiDescription?: string | null) => void;
   logout: () => void;
   setVersion: (coreVersion: string | null, apiVersion: string | null) => void;
+  setCustomTitle: (webuiTitle: string | null, webuiDescription: string | null) => void;
 }
 
 const useBackendStateStoreBase = create<BackendState>()((set) => ({
@@ -45,6 +49,33 @@ const useBackendStateStoreBase = create<BackendState>()((set) => ({
           health.core_version || null,
           health.api_version || null
         );
+      }
+
+      // Update custom title information if health check returns it
+      if ('webui_title' in health || 'webui_description' in health) {
+        useAuthStore.getState().setCustomTitle(
+          'webui_title' in health ? (health.webui_title ?? null) : null,
+          'webui_description' in health ? (health.webui_description ?? null) : null
+        );
+      }
+
+      // Extract and store backend max graph nodes limit
+      if (health.configuration?.max_graph_nodes) {
+        const maxNodes = parseInt(health.configuration.max_graph_nodes, 10)
+        if (!isNaN(maxNodes) && maxNodes > 0) {
+          const currentBackendMaxNodes = useSettingsStore.getState().backendMaxGraphNodes
+
+          // Only update if the backend limit has actually changed
+          if (currentBackendMaxNodes !== maxNodes) {
+            useSettingsStore.getState().setBackendMaxGraphNodes(maxNodes)
+
+            // Auto-adjust current graphMaxNodes if it exceeds the new backend limit
+            const currentMaxNodes = useSettingsStore.getState().graphMaxNodes
+            if (currentMaxNodes > maxNodes) {
+              useSettingsStore.getState().setGraphMaxNodes(maxNodes, true)
+            }
+          }
+        }
       }
 
       set({
@@ -107,10 +138,12 @@ const isGuestToken = (token: string): boolean => {
   return payload.role === 'guest';
 };
 
-const initAuthState = (): { isAuthenticated: boolean; isGuestMode: boolean; coreVersion: string | null; apiVersion: string | null; username: string | null } => {
+const initAuthState = (): { isAuthenticated: boolean; isGuestMode: boolean; coreVersion: string | null; apiVersion: string | null; username: string | null; webuiTitle: string | null; webuiDescription: string | null } => {
   const token = localStorage.getItem('LIGHTRAG-API-TOKEN');
   const coreVersion = localStorage.getItem('LIGHTRAG-CORE-VERSION');
   const apiVersion = localStorage.getItem('LIGHTRAG-API-VERSION');
+  const webuiTitle = localStorage.getItem('LIGHTRAG-WEBUI-TITLE');
+  const webuiDescription = localStorage.getItem('LIGHTRAG-WEBUI-DESCRIPTION');
   const username = token ? getUsernameFromToken(token) : null;
 
   if (!token) {
@@ -120,6 +153,8 @@ const initAuthState = (): { isAuthenticated: boolean; isGuestMode: boolean; core
       coreVersion: coreVersion,
       apiVersion: apiVersion,
       username: null,
+      webuiTitle: webuiTitle,
+      webuiDescription: webuiDescription,
     };
   }
 
@@ -129,6 +164,8 @@ const initAuthState = (): { isAuthenticated: boolean; isGuestMode: boolean; core
     coreVersion: coreVersion,
     apiVersion: apiVersion,
     username: username,
+    webuiTitle: webuiTitle,
+    webuiDescription: webuiDescription,
   };
 };
 
@@ -142,8 +179,10 @@ export const useAuthStore = create<AuthState>(set => {
     coreVersion: initialState.coreVersion,
     apiVersion: initialState.apiVersion,
     username: initialState.username,
+    webuiTitle: initialState.webuiTitle,
+    webuiDescription: initialState.webuiDescription,
 
-    login: (token, isGuest = false, coreVersion = null, apiVersion = null) => {
+    login: (token, isGuest = false, coreVersion = null, apiVersion = null, webuiTitle = null, webuiDescription = null) => {
       localStorage.setItem('LIGHTRAG-API-TOKEN', token);
 
       if (coreVersion) {
@@ -153,6 +192,18 @@ export const useAuthStore = create<AuthState>(set => {
         localStorage.setItem('LIGHTRAG-API-VERSION', apiVersion);
       }
 
+      if (webuiTitle) {
+        localStorage.setItem('LIGHTRAG-WEBUI-TITLE', webuiTitle);
+      } else {
+        localStorage.removeItem('LIGHTRAG-WEBUI-TITLE');
+      }
+
+      if (webuiDescription) {
+        localStorage.setItem('LIGHTRAG-WEBUI-DESCRIPTION', webuiDescription);
+      } else {
+        localStorage.removeItem('LIGHTRAG-WEBUI-DESCRIPTION');
+      }
+
       const username = getUsernameFromToken(token);
       set({
         isAuthenticated: true,
@@ -160,6 +211,8 @@ export const useAuthStore = create<AuthState>(set => {
         username: username,
         coreVersion: coreVersion,
         apiVersion: apiVersion,
+        webuiTitle: webuiTitle,
+        webuiDescription: webuiDescription,
       });
     },
 
@@ -168,6 +221,8 @@ export const useAuthStore = create<AuthState>(set => {
 
       const coreVersion = localStorage.getItem('LIGHTRAG-CORE-VERSION');
       const apiVersion = localStorage.getItem('LIGHTRAG-API-VERSION');
+      const webuiTitle = localStorage.getItem('LIGHTRAG-WEBUI-TITLE');
+      const webuiDescription = localStorage.getItem('LIGHTRAG-WEBUI-DESCRIPTION');
 
       set({
         isAuthenticated: false,
@@ -175,6 +230,8 @@ export const useAuthStore = create<AuthState>(set => {
         username: null,
         coreVersion: coreVersion,
         apiVersion: apiVersion,
+        webuiTitle: webuiTitle,
+        webuiDescription: webuiDescription,
       });
     },
 
@@ -191,6 +248,27 @@ export const useAuthStore = create<AuthState>(set => {
       set({
         coreVersion: coreVersion,
         apiVersion: apiVersion
+      });
+    },
+
+    setCustomTitle: (webuiTitle, webuiDescription) => {
+      // Update localStorage
+      if (webuiTitle) {
+        localStorage.setItem('LIGHTRAG-WEBUI-TITLE', webuiTitle);
+      } else {
+        localStorage.removeItem('LIGHTRAG-WEBUI-TITLE');
+      }
+
+      if (webuiDescription) {
+        localStorage.setItem('LIGHTRAG-WEBUI-DESCRIPTION', webuiDescription);
+      } else {
+        localStorage.removeItem('LIGHTRAG-WEBUI-DESCRIPTION');
+      }
+
+      // Update state
+      set({
+        webuiTitle: webuiTitle,
+        webuiDescription: webuiDescription
       });
     }
   };

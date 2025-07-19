@@ -22,8 +22,8 @@ class QueryRequest(BaseModel):
         description="The query text",
     )
 
-    mode: Literal["local", "global", "hybrid", "naive", "mix"] = Field(
-        default="hybrid",
+    mode: Literal["local", "global", "hybrid", "naive", "mix", "bypass"] = Field(
+        default="mix",
         description="Query mode",
     )
 
@@ -49,32 +49,28 @@ class QueryRequest(BaseModel):
         description="Number of top items to retrieve. Represents entities in 'local' mode and relationships in 'global' mode.",
     )
 
-    max_token_for_text_unit: Optional[int] = Field(
-        gt=1,
+    chunk_top_k: Optional[int] = Field(
+        ge=1,
         default=None,
-        description="Maximum number of tokens allowed for each retrieved text chunk.",
+        description="Number of text chunks to retrieve initially from vector search and keep after reranking.",
     )
 
-    max_token_for_global_context: Optional[int] = Field(
-        gt=1,
+    max_entity_tokens: Optional[int] = Field(
         default=None,
-        description="Maximum number of tokens allocated for relationship descriptions in global retrieval.",
+        description="Maximum number of tokens allocated for entity context in unified token control system.",
+        ge=1,
     )
 
-    max_token_for_local_context: Optional[int] = Field(
-        gt=1,
+    max_relation_tokens: Optional[int] = Field(
         default=None,
-        description="Maximum number of tokens allocated for entity descriptions in local retrieval.",
+        description="Maximum number of tokens allocated for relationship context in unified token control system.",
+        ge=1,
     )
 
-    hl_keywords: Optional[List[str]] = Field(
+    max_total_tokens: Optional[int] = Field(
         default=None,
-        description="List of high-level keywords to prioritize in retrieval.",
-    )
-
-    ll_keywords: Optional[List[str]] = Field(
-        default=None,
-        description="List of low-level keywords to refine retrieval focus.",
+        description="Maximum total tokens budget for the entire query context (entities + relations + chunks + system prompt).",
+        ge=1,
     )
 
     conversation_history: Optional[List[Dict[str, Any]]] = Field(
@@ -88,24 +84,24 @@ class QueryRequest(BaseModel):
         description="Number of complete conversation turns (user-assistant pairs) to consider in the response context.",
     )
 
+    ids: list[str] | None = Field(
+        default=None, description="List of ids to filter the results."
+    )
+
+    user_prompt: Optional[str] = Field(
+        default=None,
+        description="User-provided prompt for the query. If provided, this will be used instead of the default value from prompt template.",
+    )
+
+    enable_rerank: Optional[bool] = Field(
+        default=None,
+        description="Enable reranking for retrieved text chunks. If True but no rerank model is configured, a warning will be issued. Default is True.",
+    )
+
     @field_validator("query", mode="after")
     @classmethod
     def query_strip_after(cls, query: str) -> str:
         return query.strip()
-
-    @field_validator("hl_keywords", mode="after")
-    @classmethod
-    def hl_keywords_strip_after(cls, hl_keywords: List[str] | None) -> List[str] | None:
-        if hl_keywords is None:
-            return None
-        return [keyword.strip() for keyword in hl_keywords]
-
-    @field_validator("ll_keywords", mode="after")
-    @classmethod
-    def ll_keywords_strip_after(cls, ll_keywords: List[str] | None) -> List[str] | None:
-        if ll_keywords is None:
-            return None
-        return [keyword.strip() for keyword in ll_keywords]
 
     @field_validator("conversation_history", mode="after")
     @classmethod
@@ -198,6 +194,9 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
                 if isinstance(response, str):
                     # If it's a string, send it all at once
                     yield f"{json.dumps({'response': response})}\n"
+                elif response is None:
+                    # Handle None response (e.g., when only_need_context=True but no context found)
+                    yield f"{json.dumps({'response': 'No relevant context found for the query.'})}\n"
                 else:
                     # If it's an async generator, send chunks one by one
                     try:
