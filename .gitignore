@@ -53,6 +53,8 @@ output*/
 jdk-17.0.14/
 datasets/
 raw_inputs/
+knowledge_graph.html
+datasets/
 
 # Miscellaneous
 .DS_Store
